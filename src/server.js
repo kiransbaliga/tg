@@ -50,6 +50,9 @@ function clientError(err) {
   if (err?.message === 'NOT_AUTHORIZED') {
     return { status: 401, error: 'Not logged in to Telegram. Access denied.' };
   }
+  if (err?.message === 'ACCESS_DENIED') {
+    return { status: 403, error: 'You do not have access to this album.' };
+  }
   return { status: 500, error: err?.message || 'Server error' };
 }
 
@@ -104,6 +107,35 @@ async function getReqClient(req) {
   return getCachedClient(session);
 }
 
+// ---- per-session chat access verification --------------------------------
+const accessCache = new Map(); // key: "session:chatId" -> { allowed: bool, ts: number }
+const ACCESS_TTL = 10 * 60 * 1000; // 10 minutes
+
+async function verifyAccess(req, chatId) {
+  const session = getSession(req);
+  if (!session) throw new Error('NOT_AUTHORIZED');
+
+  const cacheKey = `${session.substring(0, 16)}:${chatId}`;
+  const cached = accessCache.get(cacheKey);
+  if (cached && (Date.now() - cached.ts) < ACCESS_TTL) {
+    if (!cached.allowed) throw new Error('ACCESS_DENIED');
+    return;
+  }
+
+  const client = await getCachedClient(session);
+  const album = await store.getAlbum(chatId);
+  if (!album) throw new Error('ALBUM_NOT_FOUND');
+
+  try {
+    const peer = buildInputPeer(album);
+    await client.getMessages(peer, { limit: 1 });
+    accessCache.set(cacheKey, { allowed: true, ts: Date.now() });
+  } catch (err) {
+    accessCache.set(cacheKey, { allowed: false, ts: Date.now() });
+    throw new Error('ACCESS_DENIED');
+  }
+}
+
 // ---- web authentication --------------------------------------------------
 
 app.post('/api/auth/send-code', asyncH(async (req, res) => {
@@ -134,12 +166,27 @@ app.post('/api/auth/sign-in', asyncH(async (req, res) => {
   if (!flow) return res.status(400).json({ error: 'Login flow expired or invalid. Please request code again.' });
 
   try {
-    await flow.client.start({
-      phoneNumber: () => flow.phoneNumber,
-      password: () => password || '',
-      phoneCode: () => code,
-      onError: (err) => { throw err; },
-    });
+    let result;
+    try {
+      result = await flow.client.invoke(new Api.auth.SignIn({
+        phoneNumber: flow.phoneNumber,
+        phoneCodeHash: flow.phoneCodeHash,
+        phoneCode: code,
+      }));
+    } catch (err) {
+      if (err.errorMessage === 'SESSION_PASSWORD_NEEDED') {
+        // 2FA is enabled — use the password
+        if (!password) {
+          return res.status(400).json({ error: 'This account has 2FA enabled. Please enter your password.' });
+        }
+        const { computeCheck } = await import('telegram/Password.js');
+        const srpResult = await flow.client.invoke(new Api.account.GetPassword());
+        const srpCheck = await computeCheck(srpResult, password);
+        result = await flow.client.invoke(new Api.auth.CheckPassword({ password: srpCheck }));
+      } else {
+        throw err;
+      }
+    }
 
     const sessionString = flow.client.session.save();
     const me = await getMe(flow.client);
@@ -221,6 +268,7 @@ app.delete('/api/albums/:chatId', asyncH(async (req, res) => {
 
 app.post('/api/albums/:chatId/sync', asyncH(async (req, res) => {
   try {
+    await verifyAccess(req, req.params.chatId);
     const client = await getReqClient(req);
     if (req.query.full === '1') await store.resetAlbumSync(req.params.chatId);
     const status = syncAlbum(client, req.params.chatId);
@@ -237,11 +285,13 @@ app.get('/api/albums/:chatId/sync/status', (req, res) => {
 });
 
 app.get('/api/albums/:chatId/uploaders', asyncH(async (req, res) => {
+  await verifyAccess(req, req.params.chatId);
   res.json(await store.listUploaders(req.params.chatId));
 }));
 
 app.get('/api/albums/:chatId/media', asyncH(async (req, res) => {
   const chatId = req.params.chatId;
+  await verifyAccess(req, chatId);
   const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 200, 1), 1000);
   const offset = Math.max(Number.parseInt(req.query.offset, 10) || 0, 0);
   const senderId = req.query.sender || null;
@@ -255,6 +305,7 @@ app.get('/api/albums/:chatId/media', asyncH(async (req, res) => {
 app.get('/api/media/:id/thumb', asyncH(async (req, res) => {
   const row = await store.getMediaById(req.params.id);
   if (!row) return res.status(404).end();
+  await verifyAccess(req, row.chat_id);
 
   const r2Key = `thumbs/${row.chat_id}/${row.message_id}.jpg`;
   const publicUrl = `${R2_PUBLIC_URL}/${r2Key}`;
@@ -288,6 +339,7 @@ app.get('/api/media/:id/thumb', asyncH(async (req, res) => {
 app.get('/api/media/:id/file', asyncH(async (req, res) => {
   const row = await store.getMediaById(req.params.id);
   if (!row) return res.status(404).end();
+  await verifyAccess(req, row.chat_id);
 
   const r2Key = `media/${row.chat_id}/${row.message_id}.${row.ext || 'bin'}`;
   const publicUrl = `${R2_PUBLIC_URL}/${r2Key}`;
