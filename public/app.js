@@ -927,8 +927,11 @@ async function ensurePresetAndSelect() {
 async function main() {
   wire();
   await loadStatus();
-  await loadAlbums();
-  await ensurePresetAndSelect();
+  // Only load gallery data if user is authenticated
+  if (canUseTelegram()) {
+    await loadAlbums();
+    await ensurePresetAndSelect();
+  }
 }
 
 main();

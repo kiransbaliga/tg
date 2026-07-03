@@ -26,6 +26,21 @@ app.use((req, res, next) => {
   next();
 });
 
+// ---- global auth guard --------------------------------------------------
+// Block all /api/ routes (except auth and status) when no session is present.
+app.use('/api', (req, res, next) => {
+  if (req.path.startsWith('/auth/') || req.path === '/status') return next();
+
+  const auth = req.headers.authorization;
+  const hasHeader = auth && auth.startsWith('Bearer ') && auth.substring(7).trim().length > 0;
+  const hasQuery = req.query.session && req.query.session.trim().length > 0;
+
+  if (!hasHeader && !hasQuery) {
+    return res.status(401).json({ error: 'Not logged in to Telegram. Access denied.' });
+  }
+  next();
+});
+
 const asyncH = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
 function clientError(err) {
