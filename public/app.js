@@ -146,6 +146,10 @@ async function selectAlbum(chatId) {
   state.selectionMode = false;
   state.selected.clear();
   updateSelectionUI();
+  // Close mobile sidebar on album select
+  $('.sidebar').classList.remove('open');
+  const bd = $('#sidebar-backdrop');
+  if (bd) bd.classList.remove('visible');
   renderSidebar();
   renderMainHead();
   $('#gallery').innerHTML = '';
@@ -610,6 +614,24 @@ function renderLightbox() {
 // ---- wiring -------------------------------------------------------------
 
 function wire() {
+  // ---- mobile sidebar toggle ----
+  const backdrop = el('div', 'sidebar-backdrop');
+  backdrop.id = 'sidebar-backdrop';
+  document.body.append(backdrop);
+
+  const toggleSidebar = () => {
+    const sidebar = $('.sidebar');
+    const isOpen = sidebar.classList.toggle('open');
+    backdrop.classList.toggle('visible', isOpen);
+  };
+  const closeSidebar = () => {
+    $('.sidebar').classList.remove('open');
+    backdrop.classList.remove('visible');
+  };
+
+  $('#sidebar-toggle').addEventListener('click', toggleSidebar);
+  backdrop.addEventListener('click', closeSidebar);
+
   // Create hidden file input for upload
   const uploadInput = el('input');
   uploadInput.type = 'file';
