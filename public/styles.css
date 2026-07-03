@@ -94,6 +94,13 @@ a { color: inherit; }
 .btn:hover { background: var(--bg-soft); }
 .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .btn-primary:hover { background: #1765cc; }
+.uploader-filter {
+  border: 1px solid var(--border); background: var(--bg); border-radius: 8px;
+  padding: 7px 12px; font-size: 13px; font-weight: 500; color: var(--text);
+  max-width: 220px; cursor: pointer; font-family: inherit;
+}
+.uploader-filter:hover { background: var(--bg-soft); }
+.uploader-filter:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
 .gallery { padding: 8px 24px 60px; }
 .day-group { margin-top: 18px; }

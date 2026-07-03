@@ -87,6 +87,7 @@ app.delete('/api/albums/:chatId', (req, res) => {
 
 app.post('/api/albums/:chatId/sync', asyncH(async (req, res) => {
   try {
+    if (req.query.full === '1') store.resetAlbumSync(req.params.chatId);
     const status = syncAlbum(req.params.chatId);
     res.json(status);
   } catch (err) {
@@ -100,12 +101,17 @@ app.get('/api/albums/:chatId/sync/status', (req, res) => {
   res.json(getSyncStatus(req.params.chatId) || { running: false, done: false });
 });
 
+app.get('/api/albums/:chatId/uploaders', (req, res) => {
+  res.json(store.listUploaders(req.params.chatId));
+});
+
 app.get('/api/albums/:chatId/media', (req, res) => {
   const chatId = req.params.chatId;
   const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 200, 1), 1000);
   const offset = Math.max(Number.parseInt(req.query.offset, 10) || 0, 0);
-  const items = store.listMedia(chatId, limit, offset);
-  const total = store.countMedia(chatId);
+  const senderId = req.query.sender || null;
+  const items = store.listMedia(chatId, limit, offset, senderId);
+  const total = store.countMedia(chatId, senderId);
   res.json({ items, total, limit, offset });
 });
 
