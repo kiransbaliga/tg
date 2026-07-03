@@ -3,7 +3,7 @@ import path from 'node:path';
 import heicConvert from 'heic-convert';
 import express from 'express';
 import { ZipArchive } from 'archiver';
-import { PORT, HOST, GROUP, PUBLIC_DIR, hasCredentials, DATA_DIR, R2_PUBLIC_URL } from './config.js';
+import { PORT, HOST, GROUP, PUBLIC_DIR, hasCredentials, DATA_DIR, R2_PUBLIC_URL, API_ID, API_HASH } from './config.js';
 import * as store from './db.js';
 import {
   getClient, getMe, listDialogs, resolveEntity, buildInputPeer,
