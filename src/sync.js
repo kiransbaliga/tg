@@ -24,6 +24,7 @@ export function syncAlbum(client, chatId) {
     processed: 0,
     added: 0,
     thumbs: 0,
+    skipped: 0,
     startedAt: Date.now(),
     finishedAt: null,
   };
@@ -42,40 +43,55 @@ export function syncAlbum(client, chatId) {
         status.processed++;
         if (message.id > maxId) maxId = message.id;
 
-        const meta = extractMedia(message);
-        if (!meta || !GALLERY_TYPES.has(meta.type)) continue;
+        // A single bad/transient message must never abort the whole crawl —
+        // otherwise one hiccup leaves the album partially synced and, because
+        // the checkpoint below is never reached, the next sync restarts from
+        // scratch. Isolate per-message work so the crawl always runs to the end.
+        try {
+          const meta = extractMedia(message);
+          if (!meta || !GALLERY_TYPES.has(meta.type)) continue;
 
-        const sender = extractSender(message);
-        const isNew = await store.insertMedia({
-          chatId,
-          messageId: message.id,
-          groupedId: message.groupedId ? message.groupedId.toString() : null,
-          type: meta.type,
-          mime: meta.mime,
-          fileName: meta.fileName,
-          fileSize: meta.fileSize,
-          width: meta.width,
-          height: meta.height,
-          duration: meta.duration,
-          caption: message.message || null,
-          date: message.date,
-          ext: meta.ext,
-          senderId: sender.id,
-          senderName: sender.name,
-        });
+          const sender = extractSender(message);
+          const { inserted, thumbDownloaded } = await store.insertMedia({
+            chatId,
+            messageId: message.id,
+            groupedId: message.groupedId ? message.groupedId.toString() : null,
+            type: meta.type,
+            mime: meta.mime,
+            fileName: meta.fileName,
+            fileSize: meta.fileSize,
+            width: meta.width,
+            height: meta.height,
+            duration: meta.duration,
+            caption: message.message || null,
+            date: message.date,
+            ext: meta.ext,
+            senderId: sender.id,
+            senderName: sender.name,
+          });
 
-        if (isNew) {
-          status.added++;
-          const r2Key = `thumbs/${chatId}/${message.id}.jpg`;
-          const exists = await existsInR2(r2Key);
-          if (!exists) {
-            try {
-              if (await downloadThumbToR2(client, message, chatId, message.id)) {
-                await store.markThumbByKey(chatId, message.id);
-                status.thumbs++;
-              }
-            } catch { /* failed thumb is non-fatal */ }
+          if (inserted) status.added++;
+
+          // Ensure a thumbnail exists. Covers both brand-new rows and rows a
+          // previously interrupted sync inserted but never got a thumb for.
+          if (!thumbDownloaded) {
+            const r2Key = `thumbs/${chatId}/${message.id}.jpg`;
+            let exists = false;
+            try { exists = await existsInR2(r2Key); } catch { /* treat as missing */ }
+            if (exists) {
+              await store.markThumbByKey(chatId, message.id);
+            } else {
+              try {
+                if (await downloadThumbToR2(client, message, chatId, message.id)) {
+                  await store.markThumbByKey(chatId, message.id);
+                  status.thumbs++;
+                }
+              } catch { /* failed thumb is non-fatal */ }
+            }
           }
+        } catch (err) {
+          status.skipped++;
+          console.error(`Sync: skipped message ${message.id} in ${chatId}:`, err?.message || err);
         }
       }
 

@@ -329,11 +329,13 @@ function makeTile(it, w, h) {
   const img = el('img');
   img.loading = 'lazy';
   img.decoding = 'async';
+  img.referrerPolicy = 'no-referrer'; // R2 domain blocks foreign-Referer requests
   img.src = `/api/media/${it.id}/thumb?session=${encodeURIComponent(localStorage.getItem('tg_session') || '')}`;
   img.addEventListener('error', () => {
     img.remove();
     if (it.type === 'video' && it.file_downloaded === 1) {
       const v = el('video');
+      v.referrerPolicy = 'no-referrer';
       v.src = `/api/media/${it.id}/file?session=${encodeURIComponent(localStorage.getItem('tg_session') || '')}#t=0.1`;
       v.preload = 'metadata';
       v.muted = true;
@@ -539,6 +541,7 @@ function renderLightbox() {
 
   if (IMAGE_TYPES.has(it.type)) {
     const img = el('img');
+    img.referrerPolicy = 'no-referrer';
     img.style.display = 'none';
     stage.innerHTML = '<div class="lb-loading">Loading… (downloading original from Telegram if not cached)</div>';
     stage.append(img);
@@ -552,6 +555,7 @@ function renderLightbox() {
     img.src = src;
   } else if (it.type === 'video' || it.type === 'gif') {
     const video = el('video');
+    video.referrerPolicy = 'no-referrer';
     video.controls = true;
     video.autoplay = true;
     video.playsInline = true;
@@ -594,7 +598,10 @@ function renderLightbox() {
   }
 
   const dl = $('#lb-download');
-  dl.href = `${src}?download=1`;
+  // `src` already carries ?session=..., so append with & (a second ? would fold
+  // download=1 into the session value and break both params).
+  dl.href = `${src}&download=1`;
+  dl.referrerPolicy = 'no-referrer';
   dl.setAttribute('download', it.file_name || `media-${it.id}.${it.ext || 'bin'}`);
   $('#lb-prev').style.visibility = lbIndex > 0 ? 'visible' : 'hidden';
   $('#lb-next').style.visibility = lbIndex < state.media.length - 1 ? 'visible' : 'hidden';

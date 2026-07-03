@@ -3,6 +3,10 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Media is served via redirects to the R2 custom domain, which has Cloudflare
+       Hotlink Protection enabled (blocks requests carrying a foreign Referer).
+       Send no Referer so those requests are allowed. -->
+  <meta name="referrer" content="no-referrer" />
   <title>TG Gallery</title>
   <link rel="stylesheet" href="/styles.css" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🖼️</text></svg>" />

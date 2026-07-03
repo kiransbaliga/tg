@@ -1,0 +1,38 @@
+# Render.com Blueprint. Deploy: New + -> Blueprint -> pick this repo.
+# Render provides PORT automatically; the app binds 0.0.0.0:$PORT.
+# All secrets are sync:false so Render prompts for them (never committed to git).
+services:
+  - type: web
+    name: tg-gallery
+    runtime: node
+    plan: free
+    branch: main
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      # Telegram API (https://my.telegram.org -> API development tools)
+      - key: TG_API_ID
+        sync: false
+      - key: TG_API_HASH
+        sync: false
+      # Supabase Postgres — MUST be the Supavisor pooler string (IPv4), not the
+      # direct db.<ref>.supabase.co host (IPv6-only; times out on Render too).
+      - key: DATABASE_URL
+        sync: false
+      # Cloudflare R2
+      - key: R2_PUBLIC_URL
+        sync: false
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET_NAME
+        sync: false
+      # Optional: preset group to open on startup (@username or numeric id)
+      # - key: TG_GROUP
+      #   sync: false

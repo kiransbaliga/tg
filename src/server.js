@@ -11,11 +11,20 @@ import {
 } from './telegram.js';
 import { existsInR2, uploadToR2, getFromR2Stream, getPresignedUploadUrl, deleteFromR2 } from './r2.js';
 import { syncAlbum, getSyncStatus } from './sync.js';
-import { TelegramClient } from 'telegram';
+import { TelegramClient, Api } from 'telegram';
 import { StringSession } from 'telegram/sessions/index.js';
+import { CustomFile } from 'telegram/client/uploads.js';
 
 const app = express();
 app.use(express.json());
+
+// Media responses redirect to the R2 custom domain, which has Cloudflare Hotlink
+// Protection (blocks requests with a foreign Referer). Emitting no Referer keeps
+// those requests allowed whether the app runs on localhost or a hosted domain.
+app.use((req, res, next) => {
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  next();
+});
 
 const asyncH = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
@@ -305,20 +314,34 @@ app.get('/api/media/:id/file', asyncH(async (req, res) => {
     }
   }
 
+  // Inline views redirect to the CDN (keeps Range requests working for video
+  // seeking). Downloads instead proxy the bytes through the server so the browser
+  // force-saves with the correct filename — a cross-origin redirect makes the
+  // <a download> attribute a no-op and can't set Content-Disposition.
+  const deliver = async (key, contentType) => {
+    if (!isDownload) return res.redirect(`${R2_PUBLIC_URL}/${key}`);
+    const filename = (row.file_name || `media-${row.id}.${row.ext || 'bin'}`).replace(/["\\\r\n]/g, '');
+    const stream = await getFromR2Stream(key);
+    res.setHeader('Content-Type', contentType || row.mime || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    stream.on('error', () => { if (res.headersSent) res.destroy(); else res.status(502).end(); });
+    return stream.pipe(res);
+  };
+
   if (row.file_downloaded === 1) {
-    return res.redirect(publicUrl);
+    return deliver(r2Key);
   }
 
   if (await existsInR2(r2Key)) {
     await store.markFileByKey(row.chat_id, row.message_id);
-    return res.redirect(publicUrl);
+    return deliver(r2Key);
   }
 
   // Lazy download from Telegram to R2
   try {
     const client = await getReqClient(req);
     await ensureFullDownload(client, row);
-    return res.redirect(publicUrl);
+    return deliver(r2Key);
   } catch (err) {
     const e = clientError(err);
     res.status(e.status).json({ error: e.error });
@@ -371,11 +394,17 @@ app.post('/api/albums/:chatId/upload-confirm', asyncH(async (req, res) => {
       for await (const chunk of stream) chunks.push(chunk);
       const buffer = Buffer.concat(chunks);
 
-      // Send to Telegram directly using buffer
+      // Send to Telegram with an explicit filename + mime. Passing a raw Buffer
+      // makes GramJS name the document "unnamed" with no extension, so Telegram
+      // can't recognize the type and the file won't preview / open. Wrap it in a
+      // CustomFile and set the filename attribute so it arrives as a proper file.
+      // (The filename must NOT go in the caption — that's message text, not a name.)
+      const upload = new CustomFile(u.originalName, buffer.length, '', buffer);
       const message = await client.sendFile(peer, {
-        file: buffer,
-        caption: u.originalName,
+        file: upload,
         forceDocument: true,
+        mimeType: u.mime || undefined,
+        attributes: [new Api.DocumentAttributeFilename({ fileName: u.originalName })],
       });
 
       const meta = extractMedia(message);
@@ -485,6 +514,8 @@ app.use((err, req, res, next) => {
   res.status(e.status).json({ error: e.error });
 });
 
-app.listen(PORT, () => {
-  console.log(`\n  TG Gallery running at  http://localhost:${PORT}\n`);
+// Bind explicitly to HOST (0.0.0.0 by default) so hosting platforms like Render
+// can detect the open port — they probe 0.0.0.0:$PORT, not 127.0.0.1.
+app.listen(PORT, HOST, () => {
+  console.log(`\n  TG Gallery running on  ${HOST}:${PORT}\n`);
 });

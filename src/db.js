@@ -167,8 +167,16 @@ export async function insertMedia(row) {
     ON CONFLICT(chat_id, message_id) DO UPDATE SET
       sender_id   = COALESCE(EXCLUDED.sender_id,   media.sender_id),
       sender_name = COALESCE(EXCLUDED.sender_name, media.sender_name)
+    RETURNING (xmax = 0) AS inserted, thumb_downloaded, file_downloaded
   `;
-  return result.count > 0;
+  // xmax = 0 means the row was freshly INSERTed (not an ON CONFLICT UPDATE),
+  // so re-syncs can skip work for rows that already exist and are complete.
+  const r = result[0] || {};
+  return {
+    inserted: r.inserted === true,
+    thumbDownloaded: r.thumb_downloaded === 1,
+    fileDownloaded: r.file_downloaded === 1,
+  };
 }
 
 export async function getMediaById(id) {
@@ -215,8 +223,12 @@ export async function countMedia(chatId, senderId) {
 
 export async function listUploaders(chatId) {
   ensureDb();
+  // Postgres requires every selected column to be aggregated or grouped; unlike
+  // SQLite it won't silently pick a sender_name. Group by sender_id only and take
+  // MAX(sender_name) so a person whose messages have mixed null/non-null names
+  // collapses to a single uploader entry instead of several.
   return sql`
-    SELECT sender_id, sender_name, COUNT(*)::int AS media_count
+    SELECT sender_id, MAX(sender_name) AS sender_name, COUNT(*)::int AS media_count
     FROM media
     WHERE chat_id = ${String(chatId)} AND sender_id IS NOT NULL
     GROUP BY sender_id
