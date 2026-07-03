@@ -111,7 +111,7 @@ function renderSidebar() {
     body.append(el('div', 'album-sub', syncing ? 'Syncing…' : `${a.media_count} item${a.media_count === 1 ? '' : 's'}`));
     const sync = el('button', 'album-sync' + (syncing ? ' spinning' : ''), '↻');
     sync.title = 'Sync from Telegram';
-    sync.addEventListener('click', (e) => { e.stopPropagation(); startSync(a.chat_id); });
+    sync.addEventListener('click', (e) => { e.stopPropagation(); startSync(a.chat_id, e.shiftKey); });
     row.append(icon, body, sync);
     row.addEventListener('click', () => selectAlbum(a.chat_id));
     list.append(row);
@@ -206,7 +206,7 @@ function renderMainHead() {
 
   const syncBtn = el('button', 'btn btn-primary', state.syncTimers.has(a.chat_id) ? 'Syncing…' : '↻ Sync');
   syncBtn.disabled = state.syncTimers.has(a.chat_id);
-  syncBtn.addEventListener('click', () => startSync(a.chat_id));
+  syncBtn.addEventListener('click', (e) => startSync(a.chat_id, e.shiftKey));
   actions.append(syncBtn);
   head.append(left, actions);
 }
@@ -346,7 +346,7 @@ function makeTile(it, w, h) {
 
 // ---- sync ---------------------------------------------------------------
 
-async function startSync(chatId) {
+async function startSync(chatId, forceFull = false) {
   if (!canUseTelegram()) {
     alert(state.status?.hasCredentials
       ? 'Not logged in. Run "npm run login" in the project folder, then reload.'
@@ -354,7 +354,7 @@ async function startSync(chatId) {
     return;
   }
   if (state.syncTimers.has(chatId)) return;
-  const needsFull = state.uploaders.length === 0 && state.media.length > 0;
+  const needsFull = forceFull || (state.uploaders.length === 0 && state.media.length > 0) || state.media.some(m => !m.sender_id);
   const url = `/api/albums/${chatId}/sync${needsFull ? '?full=1' : ''}`;
   try {
     await api(url, { method: 'POST' });
