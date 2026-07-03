@@ -321,15 +321,27 @@ function makeTile(it, w, h) {
   img.decoding = 'async';
   img.src = `/api/media/${it.id}/thumb`;
   img.addEventListener('error', () => {
-    tile.classList.add('noimg');
     img.remove();
-    let icon = '🖼️';
-    if (it.type === 'video') icon = '🎬';
-    else if (it.type === 'document') icon = '📄';
-    tile.prepend(el('div', null, icon));
-    if (it.type === 'document') {
-      const nameEl = el('div', 'tile-doc-name', escapeHtml(it.file_name || 'Document'));
-      tile.append(nameEl);
+    if (it.type === 'video' && it.file_downloaded === 1) {
+      const v = el('video');
+      v.src = `/api/media/${it.id}/file#t=0.1`;
+      v.preload = 'metadata';
+      v.muted = true;
+      v.playsInline = true;
+      v.style.width = '100%';
+      v.style.height = '100%';
+      v.style.objectFit = 'cover';
+      tile.prepend(v);
+    } else {
+      tile.classList.add('noimg');
+      let icon = '🖼️';
+      if (it.type === 'video') icon = '🎬';
+      else if (it.type === 'document') icon = '📄';
+      tile.prepend(el('div', null, icon));
+      if (it.type === 'document') {
+        const nameEl = el('div', 'tile-doc-name', escapeHtml(it.file_name || 'Document'));
+        tile.append(nameEl);
+      }
     }
   }, { once: true });
   tile.append(img);
@@ -469,12 +481,28 @@ function openLightbox(index) {
 function closeLightbox() {
   lbToken++;
   $('#lightbox').classList.add('hidden');
+  const video = $('#lb-stage video');
+  if (video) {
+    try {
+      video.pause();
+      video.src = '';
+      video.load();
+    } catch { /* noop */ }
+  }
   $('#lb-stage').innerHTML = '';
   lbIndex = -1;
 }
 function stepLightbox(delta) {
   const next = lbIndex + delta;
   if (next < 0 || next >= state.media.length) return;
+  const video = $('#lb-stage video');
+  if (video) {
+    try {
+      video.pause();
+      video.src = '';
+      video.load();
+    } catch { /* noop */ }
+  }
   lbIndex = next;
   renderLightbox();
   if (next >= state.media.length - 5) loadMore();
@@ -484,12 +512,32 @@ function renderLightbox() {
   if (!it) return;
   const token = ++lbToken;
   const stage = $('#lb-stage');
-  stage.innerHTML = '<div class="lb-loading">Loading… (downloading original from Telegram if not cached)</div>';
   const src = `/api/media/${it.id}/file`;
-  const fail = () => { if (token === lbToken) stage.innerHTML = '<div class="lb-loading">Failed to load this item.</div>'; };
+  
+  const fail = async () => {
+    if (token !== lbToken) return;
+    try {
+      const res = await fetch(src);
+      if (!res.ok) {
+        const data = await res.json();
+        stage.innerHTML = `<div class="lb-loading">Failed to load: ${escapeHtml(data.error || `HTTP ${res.status}`)}</div>`;
+        return;
+      }
+    } catch { /* ignore */ }
+    stage.innerHTML = '<div class="lb-loading">Failed to load this item.</div>';
+  };
+
   if (IMAGE_TYPES.has(it.type)) {
     const img = el('img');
-    img.addEventListener('load', () => { if (token !== lbToken) return; stage.innerHTML = ''; stage.append(img); }, { once: true });
+    img.style.display = 'none';
+    stage.innerHTML = '<div class="lb-loading">Loading… (downloading original from Telegram if not cached)</div>';
+    stage.append(img);
+    img.addEventListener('load', () => {
+      if (token !== lbToken) return;
+      const loading = stage.querySelector('.lb-loading');
+      if (loading) loading.remove();
+      img.style.display = '';
+    }, { once: true });
     img.addEventListener('error', fail, { once: true });
     img.src = src;
   } else if (it.type === 'video' || it.type === 'gif') {
@@ -497,8 +545,16 @@ function renderLightbox() {
     video.controls = true;
     video.autoplay = true;
     video.playsInline = true;
+    video.style.display = 'none';
     if (it.type === 'gif') { video.loop = true; video.muted = true; }
-    video.addEventListener('loadeddata', () => { if (token !== lbToken) return; stage.innerHTML = ''; stage.append(video); }, { once: true });
+    stage.innerHTML = '<div class="lb-loading">Loading video… (downloading from Telegram if not cached)</div>';
+    stage.append(video);
+    video.addEventListener('loadeddata', () => {
+      if (token !== lbToken) return;
+      const loading = stage.querySelector('.lb-loading');
+      if (loading) loading.remove();
+      video.style.display = '';
+    }, { once: true });
     video.addEventListener('error', fail, { once: true });
     video.src = src;
   } else if (it.type === 'document') {
@@ -514,6 +570,19 @@ function renderLightbox() {
     }
   }
   $('#lb-caption').textContent = it.caption || it.file_name || '';
+
+  // Populate Uploader details
+  const uploaderEl = $('#lb-uploader');
+  if (uploaderEl) {
+    if (it.sender_name) {
+      uploaderEl.textContent = `Uploaded by: ${it.sender_name}`;
+      uploaderEl.style.display = '';
+    } else {
+      uploaderEl.textContent = '';
+      uploaderEl.style.display = 'none';
+    }
+  }
+
   const dl = $('#lb-download');
   dl.href = `${src}?download=1`;
   dl.setAttribute('download', it.file_name || `media-${it.id}.${it.ext || 'bin'}`);

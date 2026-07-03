@@ -1,4 +1,5 @@
-import { getClient, buildInputPeer, extractMedia, downloadThumbToDisk, extractSender } from './telegram.js';
+import fs from 'node:fs';
+import { getClient, buildInputPeer, extractMedia, downloadThumbToDisk, extractSender, thumbPathForParts } from './telegram.js';
 import * as store from './db.js';
 
 const GALLERY_TYPES = new Set(['photo', 'image', 'video', 'gif', 'document']);
@@ -71,12 +72,15 @@ export function syncAlbum(chatId) {
 
         if (isNew) {
           status.added++;
-          try {
-            if (await downloadThumbToDisk(client, message, chatId, message.id)) {
-              store.markThumbByKey(chatId, message.id);
-              status.thumbs++;
-            }
-          } catch { /* a failed thumb is non-fatal; grid falls back gracefully */ }
+          const thumbPath = thumbPathForParts(chatId, message.id);
+          if (!fs.existsSync(thumbPath)) {
+            try {
+              if (await downloadThumbToDisk(client, message, chatId, message.id)) {
+                store.markThumbByKey(chatId, message.id);
+                status.thumbs++;
+              }
+            } catch { /* a failed thumb is non-fatal; grid falls back gracefully */ }
+          }
         }
       }
 
