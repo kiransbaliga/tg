@@ -186,7 +186,7 @@ function renderMainHead() {
   left.append(el('div', 'meta', `${itemCount} item${itemCount === 1 ? '' : 's'}${suffix} · ${a.downloaded_count} downloaded`));
   const actions = el('div', 'head-actions');
 
-  if (state.uploaders.length > 1) {
+  if (state.uploaders.length >= 1) {
     const select = el('select', 'uploader-filter');
     const allOpt = el('option', null, 'All uploaders');
     allOpt.value = '';
@@ -329,12 +329,12 @@ function makeTile(it, w, h) {
   const img = el('img');
   img.loading = 'lazy';
   img.decoding = 'async';
-  img.src = `/api/media/${it.id}/thumb`;
+  img.src = `/api/media/${it.id}/thumb?session=${encodeURIComponent(localStorage.getItem('tg_session') || '')}`;
   img.addEventListener('error', () => {
     img.remove();
     if (it.type === 'video' && it.file_downloaded === 1) {
       const v = el('video');
-      v.src = `/api/media/${it.id}/file#t=0.1`;
+      v.src = `/api/media/${it.id}/file?session=${encodeURIComponent(localStorage.getItem('tg_session') || '')}#t=0.1`;
       v.preload = 'metadata';
       v.muted = true;
       v.playsInline = true;
@@ -522,7 +522,7 @@ function renderLightbox() {
   if (!it) return;
   const token = ++lbToken;
   const stage = $('#lb-stage');
-  const src = `/api/media/${it.id}/file`;
+  const src = `/api/media/${it.id}/file?session=${encodeURIComponent(localStorage.getItem('tg_session') || '')}`;
   
   const fail = async () => {
     if (token !== lbToken) return;

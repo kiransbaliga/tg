@@ -65,8 +65,13 @@ setInterval(() => {
 // Helper to extract session from headers
 function getSession(req) {
   const auth = req.headers.authorization;
-  if (!auth || !auth.startsWith('Bearer ')) return null;
-  return auth.substring(7).trim();
+  if (auth && auth.startsWith('Bearer ')) {
+    return auth.substring(7).trim();
+  }
+  if (req.query.session) {
+    return req.query.session.trim();
+  }
+  return null;
 }
 
 async function getReqClient(req) {
