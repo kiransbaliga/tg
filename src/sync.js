@@ -1,7 +1,7 @@
 import { getClient, buildInputPeer, extractMedia, downloadThumbToDisk, extractSender } from './telegram.js';
 import * as store from './db.js';
 
-const GALLERY_TYPES = new Set(['photo', 'image', 'video', 'gif']);
+const GALLERY_TYPES = new Set(['photo', 'image', 'video', 'gif', 'document']);
 
 // chatId -> live status object (mutated in place as sync runs)
 const statusByChat = new Map();

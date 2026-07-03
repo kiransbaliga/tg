@@ -8,6 +8,14 @@ const el = (tag, cls, html) => {
   return n;
 };
 
+function formatBytes(bytes) {
+  if (!bytes) return 'Unknown size';
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
 async function api(path, opts) {
   const res = await fetch(path, opts);
   const text = await res.text();
@@ -52,6 +60,8 @@ const state = {
   syncTimers: new Map(),
   uploaders: [],      // { sender_id, sender_name, media_count } for current album
   filterSender: null, // sender_id or null for "all"
+  selectionMode: false,
+  selected: new Set(),
 };
 
 const IMAGE_TYPES = new Set(['photo', 'image']);
@@ -123,6 +133,9 @@ async function selectAlbum(chatId) {
   state.total = 0;
   state.uploaders = [];
   state.filterSender = null;
+  state.selectionMode = false;
+  state.selected.clear();
+  updateSelectionUI();
   renderSidebar();
   renderMainHead();
   $('#gallery').innerHTML = '';
@@ -177,6 +190,19 @@ function renderMainHead() {
     select.addEventListener('change', () => applyUploaderFilter(select.value));
     actions.append(select);
   }
+
+  const selectBtn = el('button', 'btn' + (state.selectionMode ? ' btn-primary' : ''), state.selectionMode ? '✓ Done' : '☑ Select');
+  selectBtn.addEventListener('click', () => {
+    state.selectionMode = !state.selectionMode;
+    if (!state.selectionMode) state.selected.clear();
+    updateSelectionUI();
+    renderMainHead();
+  });
+  actions.append(selectBtn);
+
+  const uploadBtn = el('button', 'btn', '📤 Upload');
+  uploadBtn.addEventListener('click', () => $('#upload-input').click());
+  actions.append(uploadBtn);
 
   const syncBtn = el('button', 'btn btn-primary', state.syncTimers.has(a.chat_id) ? 'Syncing…' : '↻ Sync');
   syncBtn.disabled = state.syncTimers.has(a.chat_id);
@@ -283,6 +309,12 @@ function makeTile(it, w, h) {
   tile.style.width = `${w}px`;
   tile.style.height = `${h}px`;
   tile.dataset.index = idx;
+  if (state.selectionMode && state.selected.has(it.id)) {
+    tile.classList.add('selected');
+  }
+
+  const chk = el('div', 'tile-checkbox', '✓');
+  tile.append(chk);
 
   const img = el('img');
   img.loading = 'lazy';
@@ -291,7 +323,14 @@ function makeTile(it, w, h) {
   img.addEventListener('error', () => {
     tile.classList.add('noimg');
     img.remove();
-    tile.prepend(el('div', null, it.type === 'video' ? '🎬' : '🖼️'));
+    let icon = '🖼️';
+    if (it.type === 'video') icon = '🎬';
+    else if (it.type === 'document') icon = '📄';
+    tile.prepend(el('div', null, icon));
+    if (it.type === 'document') {
+      const nameEl = el('div', 'tile-doc-name', escapeHtml(it.file_name || 'Document'));
+      tile.append(nameEl);
+    }
   }, { once: true });
   tile.append(img);
 
@@ -453,7 +492,7 @@ function renderLightbox() {
     img.addEventListener('load', () => { if (token !== lbToken) return; stage.innerHTML = ''; stage.append(img); }, { once: true });
     img.addEventListener('error', fail, { once: true });
     img.src = src;
-  } else {
+  } else if (it.type === 'video' || it.type === 'gif') {
     const video = el('video');
     video.controls = true;
     video.autoplay = true;
@@ -462,6 +501,17 @@ function renderLightbox() {
     video.addEventListener('loadeddata', () => { if (token !== lbToken) return; stage.innerHTML = ''; stage.append(video); }, { once: true });
     video.addEventListener('error', fail, { once: true });
     video.src = src;
+  } else if (it.type === 'document') {
+    if (token === lbToken) {
+      const docCard = el('div', 'lb-document-card');
+      docCard.innerHTML = `
+        <div class="lb-doc-icon">📄</div>
+        <div class="lb-doc-name">${escapeHtml(it.file_name || 'Document')}</div>
+        <div class="lb-doc-size">${formatBytes(it.file_size)}</div>
+      `;
+      stage.innerHTML = '';
+      stage.append(docCard);
+    }
   }
   $('#lb-caption').textContent = it.caption || it.file_name || '';
   const dl = $('#lb-download');
@@ -474,6 +524,32 @@ function renderLightbox() {
 // ---- wiring -------------------------------------------------------------
 
 function wire() {
+  // Create hidden file input for upload
+  const uploadInput = el('input');
+  uploadInput.type = 'file';
+  uploadInput.multiple = true;
+  uploadInput.id = 'upload-input';
+  uploadInput.style.display = 'none';
+  uploadInput.addEventListener('change', handleUpload);
+  document.body.append(uploadInput);
+
+  // Create selection bar
+  const bar = el('div', 'selection-bar hidden');
+  bar.id = 'selection-bar';
+  bar.innerHTML = `
+    <span id="selection-count">0 items selected</span>
+    <button class="btn-selection btn-selection-primary" id="btn-download-selected">Download Selected</button>
+    <button class="btn-selection" id="btn-clear-selection">Cancel</button>
+  `;
+  document.body.append(bar);
+
+  $('#btn-download-selected').addEventListener('click', downloadSelected);
+  $('#btn-clear-selection').addEventListener('click', () => {
+    state.selected.clear();
+    document.querySelectorAll('.tile.selected').forEach((t) => t.classList.remove('selected'));
+    updateSelectionUI();
+  });
+
   $('#add-album').addEventListener('click', openAddModal);
   $('#modal-close').addEventListener('click', () => $('#modal').classList.add('hidden'));
   $('#modal').addEventListener('click', (e) => { if (e.target.id === 'modal') $('#modal').classList.add('hidden'); });
@@ -481,7 +557,23 @@ function wire() {
 
   $('#gallery').addEventListener('click', (e) => {
     const tile = e.target.closest('.tile');
-    if (tile) openLightbox(Number(tile.dataset.index));
+    if (!tile) return;
+    const idx = Number(tile.dataset.index);
+    const it = state.media[idx];
+    if (!it) return;
+
+    if (state.selectionMode) {
+      if (state.selected.has(it.id)) {
+        state.selected.delete(it.id);
+        tile.classList.remove('selected');
+      } else {
+        state.selected.add(it.id);
+        tile.classList.add('selected');
+      }
+      updateSelectionUI();
+    } else {
+      openLightbox(idx);
+    }
   });
 
   $('#lb-close').addEventListener('click', closeLightbox);
@@ -510,6 +602,90 @@ function wire() {
       main.scrollTop = ratio * main.scrollHeight; // keep viewport roughly stable across relayout
     }, 150);
   });
+}
+
+function updateSelectionUI() {
+  const gallery = $('#gallery');
+  if (state.selectionMode) {
+    gallery.classList.add('selection-mode');
+  } else {
+    gallery.classList.remove('selection-mode');
+    document.querySelectorAll('.tile.selected').forEach((t) => t.classList.remove('selected'));
+  }
+  const bar = $('#selection-bar');
+  if (state.selectionMode && state.selected.size > 0) {
+    $('#selection-count').textContent = `${state.selected.size} item${state.selected.size === 1 ? '' : 's'} selected`;
+    bar.classList.remove('hidden');
+  } else {
+    bar.classList.add('hidden');
+  }
+}
+
+async function downloadSelected() {
+  const ids = Array.from(state.selected);
+  if (!ids.length) return;
+  const dlBtn = $('#btn-download-selected');
+  const prevText = dlBtn.textContent;
+  dlBtn.textContent = 'Zipping…';
+  dlBtn.disabled = true;
+  try {
+    const res = await fetch('/api/media/download-zip', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'gallery-download.zip';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    state.selected.clear();
+    state.selectionMode = false;
+    updateSelectionUI();
+    renderMainHead();
+  } catch (err) {
+    alert('ZIP download failed: ' + err.message);
+  } finally {
+    dlBtn.textContent = prevText;
+    dlBtn.disabled = false;
+  }
+}
+
+async function handleUpload(e) {
+  const files = e.target.files;
+  if (!files || !files.length) return;
+  const chatId = state.current;
+  if (!chatId) return;
+  const fd = new FormData();
+  for (const f of files) fd.append('files', f);
+  const uploadBtn = Array.from(document.querySelectorAll('.head-actions button')).find((b) => b.textContent.includes('Upload'));
+  const prevText = uploadBtn.textContent;
+  uploadBtn.textContent = 'Uploading…';
+  uploadBtn.disabled = true;
+  try {
+    const res = await fetch(`/api/albums/${chatId}/upload`, {
+      method: 'POST',
+      body: fd,
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    alert(`Successfully uploaded ${data.added.length} file(s) to Telegram!`);
+    e.target.value = '';
+    await selectAlbum(chatId);
+  } catch (err) {
+    alert('Upload failed: ' + err.message);
+  } finally {
+    uploadBtn.textContent = prevText;
+    uploadBtn.disabled = false;
+  }
 }
 
 function presetMatches(album, preset) {

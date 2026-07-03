@@ -186,11 +186,11 @@ export function extractMedia(message) {
       }
     }
     const isImage = mime.startsWith('image/');
+    const isVideoMime = mime.startsWith('video/');
     let type = 'document';
-    if (isVideo) type = 'video';
+    if (isVideo || isVideoMime) type = 'video';
     else if (isGif) type = 'gif';
     else if (isImage) type = 'image';
-    if (type === 'document') return null; // skip non-media files (pdf, zip, ...) for the gallery
 
     const ext = extFromName(fileName) || extFromMime(mime) || 'bin';
     let size = null;

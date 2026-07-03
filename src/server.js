@@ -1,17 +1,26 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import heicConvert from 'heic-convert';
 import express from 'express';
-import { PORT, HOST, GROUP, PUBLIC_DIR, hasCredentials } from './config.js';
+import multer from 'multer';
+import { ZipArchive } from 'archiver';
+import { PORT, HOST, GROUP, PUBLIC_DIR, hasCredentials, DATA_DIR } from './config.js';
 import * as store from './db.js';
 import {
   getClient, getMe, listDialogs, resolveEntity, buildInputPeer,
-  ensureFullDownload, downloadThumbToDisk,
+  ensureFullDownload, downloadThumbToDisk, extractMedia, extractSender,
   thumbPathForRow, mediaPathForRow,
 } from './telegram.js';
 import { syncAlbum, getSyncStatus } from './sync.js';
 
 const app = express();
 app.use(express.json());
+
+const uploadDir = path.join(DATA_DIR, 'temp');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+const upload = multer({ dest: uploadDir });
 
 const asyncH = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
@@ -183,6 +192,133 @@ app.get('/api/media/:id/file', asyncH(async (req, res) => {
   }
   res.set('Cache-Control', 'private, max-age=3600');
   res.sendFile(filePath); // send() adds Range/206 support for video seeking
+}));
+
+app.post('/api/albums/:chatId/upload', upload.array('files'), asyncH(async (req, res) => {
+  const chatId = req.params.chatId;
+  const album = store.getAlbum(chatId);
+  if (!album) return res.status(404).json({ error: 'Album not found' });
+  if (!req.files || !req.files.length) {
+    return res.status(400).json({ error: 'No files uploaded' });
+  }
+
+  const results = [];
+  const client = await getClient();
+  const peer = buildInputPeer(album);
+
+  for (const file of req.files) {
+    let uploadPath = file.path;
+    const tempSubdir = path.join(uploadDir, `${Date.now()}-${Math.random().toString(36).substring(2, 8)}`);
+    try {
+      fs.mkdirSync(tempSubdir, { recursive: true });
+      const finalUploadPath = path.join(tempSubdir, file.originalname);
+      fs.renameSync(file.path, finalUploadPath);
+      uploadPath = finalUploadPath;
+
+      const message = await client.sendFile(peer, {
+        file: uploadPath,
+        caption: file.originalname,
+        forceDocument: true,
+      });
+
+      const meta = extractMedia(message);
+      if (meta) {
+        const sender = extractSender(message);
+        store.insertMedia({
+          chatId,
+          messageId: message.id,
+          groupedId: message.groupedId ? message.groupedId.toString() : null,
+          type: meta.type,
+          mime: meta.mime,
+          fileName: meta.fileName || file.originalname,
+          fileSize: meta.fileSize || file.size,
+          width: meta.width,
+          height: meta.height,
+          duration: meta.duration,
+          caption: message.message || null,
+          date: message.date,
+          ext: meta.ext,
+          senderId: sender.id,
+          senderName: sender.name,
+        });
+
+        const row = store.listMedia(chatId, 1, 0).find(m => m.message_id === message.id);
+        if (row) {
+          const dest = mediaPathForRow(row);
+          fs.mkdirSync(path.dirname(dest), { recursive: true });
+          fs.renameSync(uploadPath, dest);
+          store.markFileByKey(chatId, message.id);
+
+          try {
+            if (await downloadThumbToDisk(client, message, chatId, message.id)) {
+              store.markThumbByKey(chatId, message.id);
+            }
+          } catch { /* ignored */ }
+
+          results.push(row);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to upload file to Telegram:', err);
+    } finally {
+      try {
+        fs.rmSync(tempSubdir, { recursive: true, force: true });
+      } catch (err) {
+        console.error('Failed to clean up upload temp subdirectory:', err);
+      }
+      if (fs.existsSync(file.path)) {
+        fs.rmSync(file.path, { force: true });
+      }
+    }
+  }
+  res.json({ ok: true, added: results });
+}));
+
+app.post('/api/media/download-zip', asyncH(async (req, res) => {
+  const { ids } = req.body || {};
+  if (!ids || !Array.isArray(ids) || !ids.length) {
+    return res.status(400).json({ error: 'No media IDs provided' });
+  }
+
+  const rows = [];
+  for (const id of ids) {
+    const row = store.getMediaById(id);
+    if (row) rows.push(row);
+  }
+  if (!rows.length) {
+    return res.status(404).json({ error: 'No matching media files found' });
+  }
+
+  for (const row of rows) {
+    const filePath = mediaPathForRow(row);
+    if (!fs.existsSync(filePath)) {
+      try {
+        await ensureFullDownload(row);
+      } catch (err) {
+        console.error(`Failed to download media ${row.id} for zipping:`, err);
+      }
+    }
+  }
+
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', 'attachment; filename="gallery-download.zip"');
+
+  const archive = new ZipArchive({ zlib: { level: 9 } });
+  archive.on('error', (err) => {
+    console.error('ZIP archive error:', err);
+    res.status(500).end();
+  });
+  archive.pipe(res);
+
+  for (const row of rows) {
+    const filePath = mediaPathForRow(row);
+    if (fs.existsSync(filePath)) {
+      const name = row.file_name || `${row.type || 'media'}-${row.message_id}.${row.ext || 'bin'}`;
+      archive.file(filePath, { name });
+    }
+  }
+
+  await archive.finalize();
 }));
 
 // ---- static frontend ----------------------------------------------------
