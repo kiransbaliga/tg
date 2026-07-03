@@ -201,6 +201,18 @@ export function extractMedia(message) {
   return null;
 }
 
+// ---- sender extraction --------------------------------------------------
+
+export function extractSender(message) {
+  const senderId = message.senderId?.toString?.() ?? (message.fromId?.userId ?? message.fromId?.channelId ?? message.fromId?.chatId)?.toString?.() ?? null;
+  let name = null;
+  const s = message._sender || message.sender;
+  if (s) {
+    name = s.title || [s.firstName, s.lastName].filter(Boolean).join(' ') || s.username || null;
+  }
+  return { id: senderId, name };
+}
+
 // ---- thumbnails ---------------------------------------------------------
 
 /**

@@ -1,4 +1,4 @@
-import { getClient, buildInputPeer, extractMedia, downloadThumbToDisk } from './telegram.js';
+import { getClient, buildInputPeer, extractMedia, downloadThumbToDisk, extractSender } from './telegram.js';
 import * as store from './db.js';
 
 const GALLERY_TYPES = new Set(['photo', 'image', 'video', 'gif']);
@@ -50,6 +50,7 @@ export function syncAlbum(chatId) {
         const meta = extractMedia(message);
         if (!meta || !GALLERY_TYPES.has(meta.type)) continue;
 
+        const sender = extractSender(message);
         const isNew = store.insertMedia({
           chatId,
           messageId: message.id,
@@ -64,6 +65,8 @@ export function syncAlbum(chatId) {
           caption: message.message || null,
           date: message.date,
           ext: meta.ext,
+          senderId: sender.id,
+          senderName: sender.name,
         });
 
         if (isNew) {

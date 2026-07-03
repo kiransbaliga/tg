@@ -50,6 +50,8 @@ const state = {
   loading: false,
   gen: 0,             // bumped on album switch; stale in-flight loads self-discard
   syncTimers: new Map(),
+  uploaders: [],      // { sender_id, sender_name, media_count } for current album
+  filterSender: null, // sender_id or null for "all"
 };
 
 const IMAGE_TYPES = new Set(['photo', 'image']);
@@ -119,10 +121,33 @@ async function selectAlbum(chatId) {
   state.media = [];
   state.offset = 0;
   state.total = 0;
+  state.uploaders = [];
+  state.filterSender = null;
   renderSidebar();
   renderMainHead();
   $('#gallery').innerHTML = '';
   $('#empty').classList.add('hidden');
+  loadUploaders(chatId);
+  await loadMore();
+}
+
+async function loadUploaders(chatId) {
+  try {
+    state.uploaders = await api(`/api/albums/${chatId}/uploaders`);
+    renderMainHead();
+  } catch { /* non-critical */ }
+}
+
+async function applyUploaderFilter(senderId) {
+  state.filterSender = senderId || null;
+  state.gen++;
+  state.media = [];
+  state.offset = 0;
+  state.total = 0;
+  state.loading = false;
+  $('#gallery').innerHTML = '';
+  $('#empty').classList.add('hidden');
+  renderMainHead();
   await loadMore();
 }
 
@@ -133,8 +158,26 @@ function renderMainHead() {
   head.innerHTML = '';
   const left = el('div');
   left.append(el('h1', null, escapeHtml(a.title || a.chat_id)));
-  left.append(el('div', 'meta', `${state.total || a.media_count} items · ${a.downloaded_count} downloaded`));
+  const itemCount = state.total || a.media_count;
+  const suffix = state.filterSender ? ' (filtered)' : '';
+  left.append(el('div', 'meta', `${itemCount} item${itemCount === 1 ? '' : 's'}${suffix} · ${a.downloaded_count} downloaded`));
   const actions = el('div', 'head-actions');
+
+  if (state.uploaders.length > 1) {
+    const select = el('select', 'uploader-filter');
+    const allOpt = el('option', null, 'All uploaders');
+    allOpt.value = '';
+    select.append(allOpt);
+    for (const u of state.uploaders) {
+      const opt = el('option', null, escapeHtml(`${u.sender_name || u.sender_id} (${u.media_count})`));
+      opt.value = u.sender_id;
+      if (u.sender_id === state.filterSender) opt.selected = true;
+      select.append(opt);
+    }
+    select.addEventListener('change', () => applyUploaderFilter(select.value));
+    actions.append(select);
+  }
+
   const syncBtn = el('button', 'btn btn-primary', state.syncTimers.has(a.chat_id) ? 'Syncing…' : '↻ Sync');
   syncBtn.disabled = state.syncTimers.has(a.chat_id);
   syncBtn.addEventListener('click', () => startSync(a.chat_id));
@@ -149,7 +192,8 @@ async function loadMore() {
   const chatId = state.current;
   state.loading = true;
   try {
-    const data = await api(`/api/albums/${chatId}/media?limit=${state.pageSize}&offset=${state.offset}`);
+    const senderQ = state.filterSender ? `&sender=${encodeURIComponent(state.filterSender)}` : '';
+    const data = await api(`/api/albums/${chatId}/media?limit=${state.pageSize}&offset=${state.offset}${senderQ}`);
     if (gen !== state.gen) return; // album switched mid-fetch — discard this stale page
     state.total = data.total;
     state.offset += data.items.length;
@@ -271,8 +315,10 @@ async function startSync(chatId) {
     return;
   }
   if (state.syncTimers.has(chatId)) return;
+  const needsFull = state.uploaders.length === 0 && state.media.length > 0;
+  const url = `/api/albums/${chatId}/sync${needsFull ? '?full=1' : ''}`;
   try {
-    await api(`/api/albums/${chatId}/sync`, { method: 'POST' });
+    await api(url, { method: 'POST' });
   } catch (err) {
     alert('Sync failed to start: ' + err.message);
     return;
@@ -292,7 +338,7 @@ async function pollSync(chatId) {
     state.syncTimers.delete(chatId);
     await loadAlbums();
     if (chatId === state.current) {
-      // reload media from scratch to show newly synced items
+      loadUploaders(chatId);
       const keep = state.current;
       await selectAlbum(keep);
     } else {

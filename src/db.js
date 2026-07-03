@@ -42,6 +42,16 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_media_chat_date ON media(chat_id, date DESC, message_id DESC);
 `);
 
+// Migrations for existing databases
+const migrations = [
+  `ALTER TABLE media ADD COLUMN sender_id TEXT`,
+  `ALTER TABLE media ADD COLUMN sender_name TEXT`,
+  `CREATE INDEX IF NOT EXISTS idx_media_sender ON media(chat_id, sender_id)`,
+];
+for (const sql of migrations) {
+  try { db.exec(sql); } catch { /* column/index already exists */ }
+}
+
 const nowSec = () => Math.floor(Date.now() / 1000);
 const nn = (v) => (v === undefined ? null : v);
 
@@ -96,14 +106,22 @@ export function setAlbumSynced(chatId, lastMsgId) {
   `).run(Number(lastMsgId) || 0, nowSec(), String(chatId));
 }
 
+export function resetAlbumSync(chatId) {
+  db.prepare('UPDATE albums SET last_synced_msg_id = 0 WHERE chat_id = ?')
+    .run(String(chatId));
+}
+
 // ---- media --------------------------------------------------------------
 
 export function insertMedia(row) {
   const info = db.prepare(`
-    INSERT OR IGNORE INTO media
+    INSERT INTO media
       (chat_id, message_id, grouped_id, type, mime, file_name, file_size,
-       width, height, duration, caption, date, ext, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       width, height, duration, caption, date, ext, sender_id, sender_name, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(chat_id, message_id) DO UPDATE SET
+      sender_id   = COALESCE(excluded.sender_id,   media.sender_id),
+      sender_name = COALESCE(excluded.sender_name, media.sender_name)
   `).run(
     String(row.chatId),
     Number(row.messageId),
@@ -118,6 +136,8 @@ export function insertMedia(row) {
     nn(row.caption),
     nn(row.date),
     nn(row.ext),
+    nn(row.senderId),
+    nn(row.senderName),
     nowSec(),
   );
   return info.changes > 0;
@@ -127,20 +147,41 @@ export function getMediaById(id) {
   return db.prepare('SELECT * FROM media WHERE id = ?').get(Number(id));
 }
 
-export function listMedia(chatId, limit, offset) {
+export function listMedia(chatId, limit, offset, senderId) {
+  const where = senderId
+    ? 'WHERE chat_id = ? AND sender_id = ?'
+    : 'WHERE chat_id = ?';
+  const params = senderId
+    ? [String(chatId), String(senderId), Number(limit), Number(offset)]
+    : [String(chatId), Number(limit), Number(offset)];
   return db.prepare(`
     SELECT id, chat_id, message_id, type, mime, file_name, file_size,
            width, height, duration, caption, date, ext,
+           sender_id, sender_name,
            thumb_downloaded, file_downloaded
     FROM media
-    WHERE chat_id = ?
+    ${where}
     ORDER BY date DESC, message_id DESC
     LIMIT ? OFFSET ?
-  `).all(String(chatId), Number(limit), Number(offset));
+  `).all(...params);
 }
 
-export function countMedia(chatId) {
+export function countMedia(chatId, senderId) {
+  if (senderId) {
+    return db.prepare('SELECT COUNT(*) AS c FROM media WHERE chat_id = ? AND sender_id = ?')
+      .get(String(chatId), String(senderId)).c;
+  }
   return db.prepare('SELECT COUNT(*) AS c FROM media WHERE chat_id = ?').get(String(chatId)).c;
+}
+
+export function listUploaders(chatId) {
+  return db.prepare(`
+    SELECT sender_id, sender_name, COUNT(*) AS media_count
+    FROM media
+    WHERE chat_id = ? AND sender_id IS NOT NULL
+    GROUP BY sender_id
+    ORDER BY media_count DESC
+  `).all(String(chatId));
 }
 
 export function markThumbByKey(chatId, messageId) {
