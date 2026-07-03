@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import heicConvert from 'heic-convert';
 import express from 'express';
 import { PORT, HOST, GROUP, PUBLIC_DIR, hasCredentials } from './config.js';
 import * as store from './db.js';
@@ -143,8 +144,34 @@ app.get('/api/media/:id/file', asyncH(async (req, res) => {
   }
   if (!fs.existsSync(filePath)) return res.status(404).end();
 
+  const isDownload = req.query.download === '1';
+  const isHeic = row.ext?.toLowerCase() === 'heic' || row.ext?.toLowerCase() === 'heif';
+
+  if (isHeic && !isDownload) {
+    const convertedPath = filePath + '.jpg';
+    if (!fs.existsSync(convertedPath)) {
+      try {
+        const inputBuffer = fs.readFileSync(filePath);
+        const outputBuffer = await heicConvert({
+          buffer: inputBuffer,
+          format: 'JPEG',
+          quality: 0.9,
+        });
+        fs.writeFileSync(convertedPath, outputBuffer);
+      } catch (err) {
+        console.error(`Failed to convert HEIC file ${filePath} to JPEG:`, err);
+        // Fallback to original file
+      }
+    }
+    if (fs.existsSync(convertedPath)) {
+      res.type('image/jpeg');
+      res.set('Cache-Control', 'private, max-age=3600');
+      return res.sendFile(convertedPath);
+    }
+  }
+
   if (row.mime) res.type(row.mime);
-  if (req.query.download === '1') {
+  if (isDownload) {
     const name = row.file_name || `${row.type || 'media'}-${row.message_id}.${row.ext || 'bin'}`;
     return res.download(filePath, name);
   }
