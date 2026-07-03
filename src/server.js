@@ -105,11 +105,10 @@ app.post('/api/auth/sign-in', asyncH(async (req, res) => {
   if (!flow) return res.status(400).json({ error: 'Login flow expired or invalid. Please request code again.' });
 
   try {
-    await flow.client.signIn({
-      phoneNumber: flow.phoneNumber,
-      phoneCodeHash: flow.phoneCodeHash,
-      phoneCode: code,
-      password: async () => password || '',
+    await flow.client.start({
+      phoneNumber: () => flow.phoneNumber,
+      password: () => password || '',
+      phoneCode: () => code,
       onError: (err) => { throw err; },
     });
 
