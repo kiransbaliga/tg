@@ -480,6 +480,6 @@ app.use((err, req, res, next) => {
   res.status(e.status).json({ error: e.error });
 });
 
-app.listen(PORT, HOST, () => {
-  console.log(`\n  TG Gallery running at  http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}\n`);
+app.listen(PORT, () => {
+  console.log(`\n  TG Gallery running at  http://localhost:${PORT}\n`);
 });
