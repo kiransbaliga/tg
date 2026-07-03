@@ -1,0 +1,20 @@
+{
+  "name": "tg-gallery",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Google-Photos-style gallery for your Telegram media (view + download).",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "login": "node --disable-warning=ExperimentalWarning src/login.js",
+    "start": "node --disable-warning=ExperimentalWarning src/server.js",
+    "dev": "node --disable-warning=ExperimentalWarning --watch src/server.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "telegram": "^2.26.22"
+  }
+}

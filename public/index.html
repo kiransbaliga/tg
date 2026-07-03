@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TG Gallery</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🖼️</text></svg>" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">◈</span>
+      <span class="brand-name">TG Gallery</span>
+    </div>
+    <div id="status" class="status"></div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-head">
+        <span>Albums</span>
+        <button id="add-album" class="btn-add" title="Add an album from your Telegram chats">+ Add</button>
+      </div>
+      <nav id="album-list" class="album-list"></nav>
+    </aside>
+
+    <main class="main">
+      <div id="main-head" class="main-head"></div>
+      <div id="gallery" class="gallery"></div>
+      <div id="sentinel" class="sentinel"></div>
+      <div id="empty" class="empty"></div>
+    </main>
+  </div>
+
+  <!-- Add-album modal -->
+  <div id="modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2>Add an album</h2>
+        <button id="modal-close" class="icon-btn">✕</button>
+      </div>
+      <input id="dialog-search" class="search" type="text" placeholder="Search your chats…" />
+      <div id="dialog-list" class="dialog-list"></div>
+    </div>
+  </div>
+
+  <!-- Lightbox -->
+  <div id="lightbox" class="lightbox hidden">
+    <button id="lb-close" class="lb-btn lb-close" title="Close (Esc)">✕</button>
+    <button id="lb-prev" class="lb-btn lb-prev" title="Previous (←)">‹</button>
+    <button id="lb-next" class="lb-btn lb-next" title="Next (→)">›</button>
+    <div id="lb-stage" class="lb-stage"></div>
+    <div class="lb-bar">
+      <div id="lb-caption" class="lb-caption"></div>
+      <a id="lb-download" class="lb-download" href="#" download>⬇ Download original</a>
+    </div>
+  </div>
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>
