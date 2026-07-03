@@ -3,42 +3,28 @@ import path from 'node:path';
 import bigInt from 'big-integer';
 import { TelegramClient, Api } from 'telegram';
 import { StringSession } from 'telegram/sessions/index.js';
-import {
-  API_ID, API_HASH, MEDIA_DIR, THUMBS_DIR,
-  hasCredentials, loadSession,
-} from './config.js';
+import { API_ID, API_HASH, hasCredentials } from './config.js';
 import { getAlbum, markFileByKey } from './db.js';
+import { uploadToR2 } from './r2.js';
 
-// ---- shared client singleton -------------------------------------------
+// ---- shared client creator -------------------------------------------
 
-let clientPromise = null;
-
-export async function getClient() {
-  if (clientPromise) return clientPromise;
-  clientPromise = (async () => {
-    if (!hasCredentials()) throw new Error('NO_CREDENTIALS');
-    const session = new StringSession(loadSession());
-    const client = new TelegramClient(session, API_ID, API_HASH, {
-      connectionRetries: 5,
-      floodSleepThreshold: 60,
-      autoReconnect: true,
-    });
-    try { client.setLogLevel?.('error'); } catch { /* noop */ }
-    try { client.logger?.setLevel?.('error'); } catch { /* noop */ }
-    await client.connect();
-    if (!(await client.isUserAuthorized())) throw new Error('NOT_AUTHORIZED');
-    return client;
-  })();
-  try {
-    return await clientPromise;
-  } catch (err) {
-    clientPromise = null; // allow a later retry once creds/session are fixed
-    throw err;
-  }
+export async function getClient(sessionString) {
+  if (!sessionString) throw new Error('NO_SESSION');
+  if (!hasCredentials()) throw new Error('NO_CREDENTIALS');
+  const session = new StringSession(sessionString);
+  const client = new TelegramClient(session, API_ID, API_HASH, {
+    connectionRetries: 5,
+    floodSleepThreshold: 60,
+    autoReconnect: true,
+  });
+  try { client.setLogLevel?.('error'); } catch { /* noop */ }
+  try { client.logger?.setLevel?.('error'); } catch { /* noop */ }
+  await client.connect();
+  return client;
 }
 
-export async function getMe() {
-  const client = await getClient();
+export async function getMe(client) {
   const me = await client.getMe();
   return {
     id: me.id?.toString?.() ?? String(me.id),
@@ -76,13 +62,7 @@ export function buildInputPeer(album) {
   }
 }
 
-/**
- * Resolve a chat spec (@username, t.me link, or numeric id) into the fields we
- * store as an album. For numeric ids we first warm the dialog cache so GramJS
- * can turn the id into an input entity.
- */
-export async function resolveEntity(spec) {
-  const client = await getClient();
+export async function resolveEntity(client, spec) {
   const raw = String(spec).trim().replace(/^https?:\/\/t\.me\//i, '').replace(/^\/+/, '');
   let arg = raw;
   if (/^-?\d+$/.test(raw)) {
@@ -104,8 +84,7 @@ export async function resolveEntity(spec) {
   };
 }
 
-export async function listDialogs(limit = 300) {
-  const client = await getClient();
+export async function listDialogs(client, limit = 300) {
   const dialogs = await client.getDialogs({ limit });
   const out = [];
   for (const d of dialogs) {
@@ -150,11 +129,6 @@ function extFromMime(mime) {
   return tail ? tail.replace(/[^a-z0-9]/gi, '').toLowerCase() : null;
 }
 
-/**
- * Normalise a message's media into a flat record, or null if it carries no
- * downloadable photo/video. Handles both compressed photos and "send as file"
- * documents (the user's case: photos/videos delivered as documents).
- */
 export function extractMedia(message) {
   const media = message?.media;
   if (!media) return null;
@@ -201,8 +175,6 @@ export function extractMedia(message) {
   return null;
 }
 
-// ---- sender extraction --------------------------------------------------
-
 export function extractSender(message) {
   const senderId = message.senderId?.toString?.() ?? (message.fromId?.userId ?? message.fromId?.channelId ?? message.fromId?.chatId)?.toString?.() ?? null;
   let name = null;
@@ -215,14 +187,6 @@ export function extractSender(message) {
 
 // ---- thumbnails ---------------------------------------------------------
 
-/**
- * Pick the thumbnail SIZE OBJECT best suited for a grid tile. We return the
- * object itself (not an index) and pass it straight to downloadMedia({thumb}).
- * GramJS's getThumb() re-sorts the size array and drops PhotoPathSize before
- * applying a numeric index, so a raw index addresses the wrong element — and
- * for documents an out-of-range index silently downloads the whole original.
- * Passing the object sidesteps all of that (getThumb returns it directly).
- */
 function chooseThumb(media) {
   const sizes = media?.document?.thumbs || media?.photo?.sizes || [];
   if (!sizes.length) return null;
@@ -240,37 +204,18 @@ function chooseThumb(media) {
   return real[real.length - 1];
 }
 
-// ---- on-disk paths ------------------------------------------------------
-
-const sanitizeSeg = (s) => (String(s).replace(/[^0-9]/g, '') || '0');
-const sanitizeExt = (e) => (String(e || 'bin').toLowerCase().replace(/[^a-z0-9]/g, '') || 'bin');
-
-export function thumbPathForParts(chatId, messageId) {
-  return path.join(THUMBS_DIR, sanitizeSeg(chatId), `${Number(messageId)}.jpg`);
-}
-export function thumbPathForRow(row) {
-  return thumbPathForParts(row.chat_id, row.message_id);
-}
-export function mediaPathForRow(row) {
-  return path.join(MEDIA_DIR, sanitizeSeg(row.chat_id), `${Number(row.message_id)}.${sanitizeExt(row.ext)}`);
-}
-
-export async function downloadThumbToDisk(client, message, chatId, messageId) {
+export async function downloadThumbToR2(client, message, chatId, messageId) {
   const size = chooseThumb(message.media);
   if (!size) return false;
   const buf = await client.downloadMedia(message, { thumb: size });
   if (!buf || !buf.length) return false;
-  const dest = thumbPathForParts(chatId, messageId);
-  fs.mkdirSync(path.dirname(dest), { recursive: true });
-  fs.writeFileSync(dest, buf);
+  const r2Key = `thumbs/${chatId}/${messageId}.jpg`;
+  await uploadToR2(r2Key, buf, 'image/jpeg');
   return true;
 }
 
 // ---- full-file download (lazy, de-duplicated) ---------------------------
 
-// Cap concurrent full-file downloads so browsing many uncached items (or a
-// browser firing lots of range requests) can't spawn unbounded parallel pulls
-// and trip a Telegram flood-wait.
 const MAX_CONCURRENT_DOWNLOADS = 3;
 let activeDownloads = 0;
 const downloadWaiters = [];
@@ -281,36 +226,32 @@ function acquireDownloadSlot() {
 }
 function releaseDownloadSlot() {
   const next = downloadWaiters.shift();
-  if (next) next();          // hand the slot directly to a waiter (count unchanged)
+  if (next) next();
   else activeDownloads--;
 }
 
 const inflight = new Map();
 
-export function ensureFullDownload(row) {
+export function ensureFullDownload(client, row) {
   const key = `${row.chat_id}:${row.message_id}`;
   if (inflight.has(key)) return inflight.get(key);
   const promise = (async () => {
-    const client = await getClient();
-    const peer = buildInputPeer(getAlbum(row.chat_id));
+    const peer = buildInputPeer(await getAlbum(row.chat_id));
     const messages = await client.getMessages(peer, { ids: [Number(row.message_id)] });
     const message = messages && messages[0];
     if (!message || !message.media) throw new Error('MESSAGE_NOT_FOUND');
-    const dest = mediaPathForRow(row);
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    const tmp = `${dest}.part`;
+    
     await acquireDownloadSlot();
     try {
-      await client.downloadMedia(message, { outputFile: tmp });
-    } catch (err) {
-      fs.rmSync(tmp, { force: true }); // never leave a partial file behind
-      throw err;
+      const buf = await client.downloadMedia(message);
+      if (!buf) throw new Error('DOWNLOAD_FAILED');
+      const r2Key = `media/${row.chat_id}/${row.message_id}.${row.ext || 'bin'}`;
+      await uploadToR2(r2Key, buf, row.mime || 'application/octet-stream');
     } finally {
       releaseDownloadSlot();
     }
-    fs.renameSync(tmp, dest);
-    markFileByKey(row.chat_id, row.message_id);
-    return dest;
+    await markFileByKey(row.chat_id, row.message_id);
+    return true;
   })().finally(() => inflight.delete(key));
   inflight.set(key, promise);
   return promise;

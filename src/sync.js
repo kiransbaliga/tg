@@ -1,5 +1,5 @@
-import fs from 'node:fs';
-import { getClient, buildInputPeer, extractMedia, downloadThumbToDisk, extractSender, thumbPathForParts } from './telegram.js';
+import { buildInputPeer, extractMedia, downloadThumbToR2, extractSender } from './telegram.js';
+import { existsInR2 } from './r2.js';
 import * as store from './db.js';
 
 const GALLERY_TYPES = new Set(['photo', 'image', 'video', 'gif', 'document']);
@@ -11,18 +11,10 @@ export function getSyncStatus(chatId) {
   return statusByChat.get(String(chatId)) || null;
 }
 
-/**
- * Sync a chat's media into the DB. Incremental: only messages newer than the
- * album's last_synced_msg_id are scanned. Runs in the background; progress is
- * exposed via getSyncStatus(). Returns the status object immediately.
- */
-export function syncAlbum(chatId) {
+export function syncAlbum(client, chatId) {
   chatId = String(chatId);
   const existing = statusByChat.get(chatId);
   if (existing?.running) return existing;
-
-  const album = store.getAlbum(chatId);
-  if (!album) throw new Error('ALBUM_NOT_FOUND');
 
   const status = {
     chatId,
@@ -39,7 +31,9 @@ export function syncAlbum(chatId) {
 
   (async () => {
     try {
-      const client = await getClient();
+      const album = await store.getAlbum(chatId);
+      if (!album) throw new Error('ALBUM_NOT_FOUND');
+
       const peer = buildInputPeer(album);
       const minId = album.last_synced_msg_id || 0;
       let maxId = minId;
@@ -52,7 +46,7 @@ export function syncAlbum(chatId) {
         if (!meta || !GALLERY_TYPES.has(meta.type)) continue;
 
         const sender = extractSender(message);
-        const isNew = store.insertMedia({
+        const isNew = await store.insertMedia({
           chatId,
           messageId: message.id,
           groupedId: message.groupedId ? message.groupedId.toString() : null,
@@ -72,19 +66,20 @@ export function syncAlbum(chatId) {
 
         if (isNew) {
           status.added++;
-          const thumbPath = thumbPathForParts(chatId, message.id);
-          if (!fs.existsSync(thumbPath)) {
+          const r2Key = `thumbs/${chatId}/${message.id}.jpg`;
+          const exists = await existsInR2(r2Key);
+          if (!exists) {
             try {
-              if (await downloadThumbToDisk(client, message, chatId, message.id)) {
-                store.markThumbByKey(chatId, message.id);
+              if (await downloadThumbToR2(client, message, chatId, message.id)) {
+                await store.markThumbByKey(chatId, message.id);
                 status.thumbs++;
               }
-            } catch { /* a failed thumb is non-fatal; grid falls back gracefully */ }
+            } catch { /* failed thumb is non-fatal */ }
           }
         }
       }
 
-      store.setAlbumSynced(chatId, maxId);
+      await store.setAlbumSynced(chatId, maxId);
     } catch (err) {
       status.error = err?.message || String(err);
     } finally {

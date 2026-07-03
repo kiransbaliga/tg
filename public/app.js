@@ -16,7 +16,12 @@ function formatBytes(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
-async function api(path, opts) {
+async function api(path, opts = {}) {
+  const session = localStorage.getItem('tg_session');
+  opts.headers = opts.headers || {};
+  if (session) {
+    opts.headers['Authorization'] = `Bearer ${session}`;
+  }
   const res = await fetch(path, opts);
   const text = await res.text();
   const data = text ? JSON.parse(text) : null;
@@ -73,13 +78,18 @@ async function loadStatus() {
   const box = $('#status');
   box.innerHTML = '';
   const s = state.status;
+  const loginOverlay = $('#login-overlay');
+
   if (!s.hasCredentials) {
     box.append(el('span', 'pill warn', 'Setup needed — add API keys to .env'));
+    loginOverlay.style.display = 'none';
   } else if (!s.authenticated) {
-    box.append(el('span', 'pill warn', 'Not logged in — run <code>npm run login</code>'));
+    box.append(el('span', 'pill warn', 'Not logged in'));
+    loginOverlay.style.display = 'flex'; // Show web login screen
   } else {
     const name = [s.me?.firstName, s.me?.lastName].filter(Boolean).join(' ') || s.me?.username || 'account';
     box.append(el('span', 'pill', `Signed in as ${name}`));
+    loginOverlay.style.display = 'none'; // Hide web login screen
   }
 }
 
@@ -671,6 +681,85 @@ function wire() {
       main.scrollTop = ratio * main.scrollHeight; // keep viewport roughly stable across relayout
     }, 150);
   });
+  // Web Login Flow wiring
+  let loginId = null;
+
+  $('#login-send').addEventListener('click', async () => {
+    const phone = $('#login-phone').value.trim();
+    if (!phone) {
+      showLoginError('Please enter your phone number.');
+      return;
+    }
+    hideLoginError();
+    $('#login-send').disabled = true;
+    $('#login-send').textContent = 'Sending…';
+    try {
+      const res = await api('/api/auth/send-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phoneNumber: phone }),
+      });
+      loginId = res.loginId;
+      $('#login-step-phone').style.display = 'none';
+      $('#login-step-code').style.display = 'block';
+    } catch (err) {
+      showLoginError(err.message);
+    } finally {
+      $('#login-send').disabled = false;
+      $('#login-send').textContent = 'Send Code';
+    }
+  });
+
+  $('#login-submit').addEventListener('click', async () => {
+    const code = $('#login-code').value.trim();
+    const password = $('#login-2fa').value.trim();
+    if (!code) {
+      showLoginError('Please enter the verification code.');
+      return;
+    }
+    hideLoginError();
+    $('#login-submit').disabled = true;
+    $('#login-submit').textContent = 'Verifying…';
+    try {
+      const res = await api('/api/auth/sign-in', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ loginId, code, password }),
+      });
+      localStorage.setItem('tg_session', res.session);
+      $('#login-overlay').style.display = 'none';
+      $('#login-phone').value = '';
+      $('#login-code').value = '';
+      $('#login-2fa').value = '';
+      $('#login-step-phone').style.display = 'block';
+      $('#login-step-code').style.display = 'none';
+
+      await loadStatus();
+      await loadAlbums();
+      await ensurePresetAndSelect();
+    } catch (err) {
+      showLoginError(err.message);
+    } finally {
+      $('#login-submit').disabled = false;
+      $('#login-submit').textContent = 'Log In';
+    }
+  });
+
+  $('#login-back').addEventListener('click', () => {
+    hideLoginError();
+    loginId = null;
+    $('#login-step-phone').style.display = 'block';
+    $('#login-step-code').style.display = 'none';
+  });
+
+  function showLoginError(msg) {
+    const err = $('#login-error');
+    err.textContent = msg;
+    err.style.display = 'block';
+  }
+  function hideLoginError() {
+    $('#login-error').style.display = 'none';
+  }
 }
 
 function updateSelectionUI() {
@@ -698,9 +787,12 @@ async function downloadSelected() {
   dlBtn.textContent = 'Zipping…';
   dlBtn.disabled = true;
   try {
+    const session = localStorage.getItem('tg_session');
+    const headers = { 'Content-Type': 'application/json' };
+    if (session) headers['Authorization'] = `Bearer ${session}`;
     const res = await fetch('/api/media/download-zip', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({ ids }),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -726,27 +818,51 @@ async function downloadSelected() {
 }
 
 async function handleUpload(e) {
-  const files = e.target.files;
+  const files = Array.from(e.target.files);
   if (!files || !files.length) return;
   const chatId = state.current;
   if (!chatId) return;
-  const fd = new FormData();
-  for (const f of files) fd.append('files', f);
+
   const uploadBtn = Array.from(document.querySelectorAll('.head-actions button')).find((b) => b.textContent.includes('Upload'));
   const prevText = uploadBtn.textContent;
   uploadBtn.textContent = 'Uploading…';
   uploadBtn.disabled = true;
+
   try {
-    const res = await fetch(`/api/albums/${chatId}/upload`, {
-      method: 'POST',
-      body: fd,
-    });
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || `HTTP ${res.status}`);
+    const fileMeta = files.map(f => ({ name: f.name, mime: f.type || 'application/octet-stream' }));
+    const { urls } = await api(`/api/albums/${chatId}/upload-urls?files=${encodeURIComponent(JSON.stringify(fileMeta))}`);
+
+    const uploads = [];
+    for (const u of urls) {
+      const file = files.find(f => f.name === u.originalName);
+      if (!file) continue;
+
+      const putRes = await fetch(u.uploadUrl, {
+        method: 'PUT',
+        body: file,
+        headers: {
+          'Content-Type': u.mime,
+        },
+      });
+
+      if (!putRes.ok) {
+        throw new Error(`Failed to upload ${u.originalName} to cloud storage (HTTP ${putRes.status})`);
+      }
+
+      uploads.push({
+        r2Key: u.r2Key,
+        mime: u.mime,
+        originalName: u.originalName,
+      });
     }
-    const data = await res.json();
-    alert(`Successfully uploaded ${data.added.length} file(s) to Telegram!`);
+
+    const confirmRes = await api(`/api/albums/${chatId}/upload-confirm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uploads }),
+    });
+
+    alert(`Successfully uploaded ${confirmRes.added.length} file(s) to Telegram!`);
     e.target.value = '';
     await selectAlbum(chatId);
   } catch (err) {

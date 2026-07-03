@@ -2,25 +2,20 @@ import fs from 'node:fs';
 import path from 'node:path';
 import heicConvert from 'heic-convert';
 import express from 'express';
-import multer from 'multer';
 import { ZipArchive } from 'archiver';
-import { PORT, HOST, GROUP, PUBLIC_DIR, hasCredentials, DATA_DIR } from './config.js';
+import { PORT, HOST, GROUP, PUBLIC_DIR, hasCredentials, DATA_DIR, R2_PUBLIC_URL } from './config.js';
 import * as store from './db.js';
 import {
   getClient, getMe, listDialogs, resolveEntity, buildInputPeer,
-  ensureFullDownload, downloadThumbToDisk, extractMedia, extractSender,
-  thumbPathForRow, mediaPathForRow,
+  ensureFullDownload, downloadThumbToR2, extractMedia, extractSender,
 } from './telegram.js';
+import { existsInR2, uploadToR2, getFromR2Stream, getPresignedUploadUrl, deleteFromR2 } from './r2.js';
 import { syncAlbum, getSyncStatus } from './sync.js';
+import { TelegramClient } from 'telegram';
+import { StringSession } from 'telegram/sessions/index.js';
 
 const app = express();
 app.use(express.json());
-
-const uploadDir = path.join(DATA_DIR, 'temp');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-const upload = multer({ dest: uploadDir });
 
 const asyncH = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
@@ -29,10 +24,107 @@ function clientError(err) {
     return { status: 428, error: 'Missing API credentials. Add TG_API_ID and TG_API_HASH to your .env file.' };
   }
   if (err?.message === 'NOT_AUTHORIZED') {
-    return { status: 401, error: 'Not logged in to Telegram. Run: npm run login' };
+    return { status: 401, error: 'Not logged in to Telegram. Access denied.' };
   }
   return { status: 500, error: err?.message || 'Server error' };
 }
+
+// ---- stateless client caching & connection pool -------------------------
+
+const clientCache = new Map(); // sessionString -> { client, lastUsed }
+const activeLogins = new Map(); // loginId -> { client, phoneCodeHash, phoneNumber, createdAt }
+
+async function getCachedClient(sessionString) {
+  if (clientCache.has(sessionString)) {
+    const entry = clientCache.get(sessionString);
+    entry.lastUsed = Date.now();
+    return entry.client;
+  }
+  const client = await getClient(sessionString);
+  clientCache.set(sessionString, { client, lastUsed: Date.now() });
+  return client;
+}
+
+// Clean up idle connections periodically
+setInterval(() => {
+  const now = Date.now();
+  for (const [session, entry] of clientCache.entries()) {
+    if (now - entry.lastUsed > 10 * 60 * 1000) { // 10 minutes idle
+      entry.client.disconnect().catch(() => {});
+      clientCache.delete(session);
+    }
+  }
+  for (const [id, flow] of activeLogins.entries()) {
+    if (now - flow.createdAt > 15 * 60 * 1000) { // 15 minutes login timeout
+      flow.client.disconnect().catch(() => {});
+      activeLogins.delete(id);
+    }
+  }
+}, 60 * 1000);
+
+// Helper to extract session from headers
+function getSession(req) {
+  const auth = req.headers.authorization;
+  if (!auth || !auth.startsWith('Bearer ')) return null;
+  return auth.substring(7).trim();
+}
+
+async function getReqClient(req) {
+  const session = getSession(req);
+  if (!session) throw new Error('NOT_AUTHORIZED');
+  return getCachedClient(session);
+}
+
+// ---- web authentication --------------------------------------------------
+
+app.post('/api/auth/send-code', asyncH(async (req, res) => {
+  const { phoneNumber } = req.body || {};
+  if (!phoneNumber) return res.status(400).json({ error: 'Phone number is required' });
+
+  const client = new TelegramClient(new StringSession(''), API_ID, API_HASH, {
+    connectionRetries: 5,
+  });
+  await client.connect();
+
+  const { phoneCodeHash } = await client.sendCode({
+    apiId: API_ID,
+    apiHash: API_HASH,
+  }, phoneNumber);
+
+  const loginId = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+  activeLogins.set(loginId, { client, phoneCodeHash, phoneNumber, createdAt: Date.now() });
+
+  res.json({ loginId });
+}));
+
+app.post('/api/auth/sign-in', asyncH(async (req, res) => {
+  const { loginId, code, password } = req.body || {};
+  if (!loginId || !code) return res.status(400).json({ error: 'loginId and code are required' });
+
+  const flow = activeLogins.get(loginId);
+  if (!flow) return res.status(400).json({ error: 'Login flow expired or invalid. Please request code again.' });
+
+  try {
+    await flow.client.signIn({
+      phoneNumber: flow.phoneNumber,
+      phoneCodeHash: flow.phoneCodeHash,
+      phoneCode: code,
+      password: async () => password || '',
+      onError: (err) => { throw err; },
+    });
+
+    const sessionString = flow.client.session.save();
+    const me = await getMe(flow.client);
+
+    // Cache the connected client for instant reuse
+    clientCache.set(sessionString, { client: flow.client, lastUsed: Date.now() });
+    activeLogins.delete(loginId);
+
+    res.json({ ok: true, session: sessionString, me });
+  } catch (err) {
+    res.status(400).json({ error: err?.message || 'Verification failed' });
+  }
+}));
 
 // ---- status -------------------------------------------------------------
 
@@ -40,19 +132,25 @@ app.get('/api/status', asyncH(async (req, res) => {
   const creds = hasCredentials();
   const base = { hasCredentials: creds, presetGroup: GROUP || null };
   if (!creds) return res.json({ ...base, authenticated: false, me: null });
+
+  const session = getSession(req);
+  if (!session) return res.json({ ...base, authenticated: false, me: null });
+
   try {
-    const me = await getMe();
+    const client = await getCachedClient(session);
+    const me = await getMe(client);
     res.json({ ...base, authenticated: true, me });
   } catch (err) {
     res.json({ ...base, authenticated: false, me: null, reason: err?.message || null });
   }
 }));
 
-// ---- dialogs (pick which chats to add as albums) ------------------------
+// ---- dialogs ------------------------------------------------------------
 
 app.get('/api/dialogs', asyncH(async (req, res) => {
   try {
-    res.json(await listDialogs());
+    const client = await getReqClient(req);
+    res.json(await listDialogs(client));
   } catch (err) {
     const e = clientError(err);
     res.status(e.status).json({ error: e.error });
@@ -61,43 +159,43 @@ app.get('/api/dialogs', asyncH(async (req, res) => {
 
 // ---- albums -------------------------------------------------------------
 
-app.get('/api/albums', (req, res) => {
-  res.json(store.listAlbums());
-});
+app.get('/api/albums', asyncH(async (req, res) => {
+  res.json(await store.listAlbums());
+}));
 
-app.post('/api/albums', (req, res) => {
+app.post('/api/albums', asyncH(async (req, res) => {
   const { chatId, title, username, peerType, accessHash, kind } = req.body || {};
   if (!chatId) return res.status(400).json({ error: 'chatId is required' });
-  const album = store.upsertAlbum({ chatId, title, username, peerType, accessHash, kind });
+  const album = await store.upsertAlbum({ chatId, title, username, peerType, accessHash, kind });
   res.json(album);
-});
+}));
 
-// Resolve a chat by @username / t.me link / id and add it as an album.
-// Used to open the preset TG_GROUP on startup (and to add by pasted handle).
 app.post('/api/albums/resolve', asyncH(async (req, res) => {
+  const client = await getReqClient(req);
   const spec = ((req.body?.spec ?? '') || GROUP).toString().trim();
   if (!spec) return res.status(400).json({ error: 'No group specified' });
   try {
-    const album = store.upsertAlbum(await resolveEntity(spec));
+    const album = await store.upsertAlbum(await resolveEntity(client, spec));
     res.json(album);
   } catch (err) {
     if (/could not find|cannot find|no user|USERNAME_(NOT_OCCUPIED|INVALID)|Cannot cast/i.test(err?.message || '')) {
-      return res.status(404).json({ error: `Could not find "${spec}". Use an @username, a t.me link, or the numeric id of a chat you're a member of.` });
+      return res.status(404).json({ error: `Could not find "${spec}".` });
     }
     const e = clientError(err);
     res.status(e.status).json({ error: e.error });
   }
 }));
 
-app.delete('/api/albums/:chatId', (req, res) => {
-  store.deleteAlbum(req.params.chatId);
+app.delete('/api/albums/:chatId', asyncH(async (req, res) => {
+  await store.deleteAlbum(req.params.chatId);
   res.json({ ok: true });
-});
+}));
 
 app.post('/api/albums/:chatId/sync', asyncH(async (req, res) => {
   try {
-    if (req.query.full === '1') store.resetAlbumSync(req.params.chatId);
-    const status = syncAlbum(req.params.chatId);
+    const client = await getReqClient(req);
+    if (req.query.full === '1') await store.resetAlbumSync(req.params.chatId);
+    const status = syncAlbum(client, req.params.chatId);
     res.json(status);
   } catch (err) {
     if (err?.message === 'ALBUM_NOT_FOUND') return res.status(404).json({ error: 'Album not found' });
@@ -110,128 +208,183 @@ app.get('/api/albums/:chatId/sync/status', (req, res) => {
   res.json(getSyncStatus(req.params.chatId) || { running: false, done: false });
 });
 
-app.get('/api/albums/:chatId/uploaders', (req, res) => {
-  res.json(store.listUploaders(req.params.chatId));
-});
+app.get('/api/albums/:chatId/uploaders', asyncH(async (req, res) => {
+  res.json(await store.listUploaders(req.params.chatId));
+}));
 
-app.get('/api/albums/:chatId/media', (req, res) => {
+app.get('/api/albums/:chatId/media', asyncH(async (req, res) => {
   const chatId = req.params.chatId;
   const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 200, 1), 1000);
   const offset = Math.max(Number.parseInt(req.query.offset, 10) || 0, 0);
   const senderId = req.query.sender || null;
-  const items = store.listMedia(chatId, limit, offset, senderId);
-  const total = store.countMedia(chatId, senderId);
+  const items = await store.listMedia(chatId, limit, offset, senderId);
+  const total = await store.countMedia(chatId, senderId);
   res.json({ items, total, limit, offset });
-});
+}));
 
-// ---- media bytes --------------------------------------------------------
+// ---- media bytes (R2 redirects with on-demand background cache) ----------
 
 app.get('/api/media/:id/thumb', asyncH(async (req, res) => {
-  const row = store.getMediaById(req.params.id);
+  const row = await store.getMediaById(req.params.id);
   if (!row) return res.status(404).end();
-  const thumbPath = thumbPathForRow(row);
-  res.set('Cache-Control', 'public, max-age=86400');
-  if (fs.existsSync(thumbPath)) return res.sendFile(thumbPath);
 
-  // Lazy fallback: fetch the message and pull its thumbnail on demand.
+  const r2Key = `thumbs/${row.chat_id}/${row.message_id}.jpg`;
+  const publicUrl = `${R2_PUBLIC_URL}/${r2Key}`;
+
+  if (row.thumb_downloaded === 1) {
+    return res.redirect(publicUrl);
+  }
+
+  // Check R2 directly just in case metadata sync is out of sync
+  if (await existsInR2(r2Key)) {
+    await store.markThumbByKey(row.chat_id, row.message_id);
+    return res.redirect(publicUrl);
+  }
+
+  // Lazy fallback: download to R2 on demand
   try {
-    const client = await getClient();
-    const peer = buildInputPeer(store.getAlbum(row.chat_id));
+    const client = await getReqClient(req);
+    const peer = buildInputPeer(await store.getAlbum(row.chat_id));
     const messages = await client.getMessages(peer, { ids: [Number(row.message_id)] });
     const message = messages && messages[0];
-    if (message && await downloadThumbToDisk(client, message, row.chat_id, row.message_id)) {
-      store.markThumbByKey(row.chat_id, row.message_id);
-      if (fs.existsSync(thumbPath)) return res.sendFile(thumbPath);
+    if (message && await downloadThumbToR2(client, message, row.chat_id, row.message_id)) {
+      await store.markThumbByKey(row.chat_id, row.message_id);
+      return res.redirect(publicUrl);
     }
-  } catch { /* fall through to 404 */ }
+  } catch (err) {
+    console.error('Failed to download thumb on demand:', err);
+  }
   res.status(404).end();
 }));
 
 app.get('/api/media/:id/file', asyncH(async (req, res) => {
-  const row = store.getMediaById(req.params.id);
+  const row = await store.getMediaById(req.params.id);
   if (!row) return res.status(404).end();
-  const filePath = mediaPathForRow(row);
+
+  const r2Key = `media/${row.chat_id}/${row.message_id}.${row.ext || 'bin'}`;
+  const publicUrl = `${R2_PUBLIC_URL}/${r2Key}`;
+  const isHeic = row.ext?.toLowerCase() === 'heic' || row.ext?.toLowerCase() === 'heif';
+  const isDownload = req.query.download === '1';
+
+  // Handle Safari/Chrome HEIC transcoding dynamically in memory
+  if (isHeic && !isDownload) {
+    const heicJpgKey = `media/${row.chat_id}/${row.message_id}.heic.jpg`;
+    const heicJpgUrl = `${R2_PUBLIC_URL}/${heicJpgKey}`;
+
+    if (await existsInR2(heicJpgKey)) {
+      return res.redirect(heicJpgUrl);
+    }
+
+    try {
+      const client = await getReqClient(req);
+      const hasOriginal = await existsInR2(r2Key);
+      if (!hasOriginal) {
+        await ensureFullDownload(client, row);
+      }
+
+      // Convert
+      const stream = await getFromR2Stream(r2Key);
+      const chunks = [];
+      for await (const chunk of stream) chunks.push(chunk);
+      const buffer = Buffer.concat(chunks);
+
+      const outputBuffer = await heicConvert({
+        buffer,
+        format: 'JPEG',
+        quality: 0.9,
+      });
+
+      await uploadToR2(heicJpgKey, outputBuffer, 'image/jpeg');
+      return res.redirect(heicJpgUrl);
+    } catch (err) {
+      console.error(`HEIC conversion failed for row ${row.id}:`, err);
+    }
+  }
+
+  if (row.file_downloaded === 1) {
+    return res.redirect(publicUrl);
+  }
+
+  if (await existsInR2(r2Key)) {
+    await store.markFileByKey(row.chat_id, row.message_id);
+    return res.redirect(publicUrl);
+  }
+
+  // Lazy download from Telegram to R2
   try {
-    if (!fs.existsSync(filePath)) await ensureFullDownload(row);
+    const client = await getReqClient(req);
+    await ensureFullDownload(client, row);
+    return res.redirect(publicUrl);
   } catch (err) {
     const e = clientError(err);
-    return res.status(e.status).json({ error: e.error });
+    res.status(e.status).json({ error: e.error });
   }
-  if (!fs.existsSync(filePath)) return res.status(404).end();
-
-  const isDownload = req.query.download === '1';
-  const isHeic = row.ext?.toLowerCase() === 'heic' || row.ext?.toLowerCase() === 'heif';
-
-  if (isHeic && !isDownload) {
-    const convertedPath = filePath + '.jpg';
-    if (!fs.existsSync(convertedPath)) {
-      try {
-        const inputBuffer = fs.readFileSync(filePath);
-        const outputBuffer = await heicConvert({
-          buffer: inputBuffer,
-          format: 'JPEG',
-          quality: 0.9,
-        });
-        fs.writeFileSync(convertedPath, outputBuffer);
-      } catch (err) {
-        console.error(`Failed to convert HEIC file ${filePath} to JPEG:`, err);
-        // Fallback to original file
-      }
-    }
-    if (fs.existsSync(convertedPath)) {
-      res.type('image/jpeg');
-      res.set('Cache-Control', 'private, max-age=3600');
-      return res.sendFile(convertedPath);
-    }
-  }
-
-  if (row.mime) res.type(row.mime);
-  if (isDownload) {
-    const name = row.file_name || `${row.type || 'media'}-${row.message_id}.${row.ext || 'bin'}`;
-    return res.download(filePath, name);
-  }
-  res.set('Cache-Control', 'private, max-age=3600');
-  res.sendFile(filePath); // send() adds Range/206 support for video seeking
 }));
 
-app.post('/api/albums/:chatId/upload', upload.array('files'), asyncH(async (req, res) => {
-  const chatId = req.params.chatId;
-  const album = store.getAlbum(chatId);
-  if (!album) return res.status(404).json({ error: 'Album not found' });
-  if (!req.files || !req.files.length) {
-    return res.status(400).json({ error: 'No files uploaded' });
+// ---- direct client-side upload helper endpoints --------------------------
+
+app.get('/api/albums/:chatId/upload-urls', asyncH(async (req, res) => {
+  const { files } = req.query; // JSON array of { name, mime }
+  if (!files) return res.status(400).json({ error: 'files parameter is required' });
+  
+  try {
+    const parsedFiles = JSON.parse(files);
+    const urls = [];
+    for (const f of parsedFiles) {
+      const ext = f.name.split('.').pop() || 'bin';
+      const tempId = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+      const r2Key = `temp/uploads/${tempId}.${ext}`;
+      const uploadUrl = await getPresignedUploadUrl(r2Key, f.mime);
+      urls.push({
+        originalName: f.name,
+        mime: f.mime,
+        r2Key,
+        uploadUrl,
+      });
+    }
+    res.json({ urls });
+  } catch (err) {
+    res.status(400).json({ error: 'Invalid files query string: ' + err.message });
   }
+}));
 
-  const results = [];
-  const client = await getClient();
+app.post('/api/albums/:chatId/upload-confirm', asyncH(async (req, res) => {
+  const chatId = req.params.chatId;
+  const album = await store.getAlbum(chatId);
+  if (!album) return res.status(404).json({ error: 'Album not found' });
+  const { uploads } = req.body || {}; // array of { r2Key, mime, originalName }
+  if (!uploads || !uploads.length) return res.status(400).json({ error: 'No uploads provided' });
+
+  const client = await getReqClient(req);
   const peer = buildInputPeer(album);
+  const results = [];
 
-  for (const file of req.files) {
-    let uploadPath = file.path;
-    const tempSubdir = path.join(uploadDir, `${Date.now()}-${Math.random().toString(36).substring(2, 8)}`);
+  for (const u of uploads) {
     try {
-      fs.mkdirSync(tempSubdir, { recursive: true });
-      const finalUploadPath = path.join(tempSubdir, file.originalname);
-      fs.renameSync(file.path, finalUploadPath);
-      uploadPath = finalUploadPath;
+      // Stream temp file from R2
+      const stream = await getFromR2Stream(u.r2Key);
+      const chunks = [];
+      for await (const chunk of stream) chunks.push(chunk);
+      const buffer = Buffer.concat(chunks);
 
+      // Send to Telegram directly using buffer
       const message = await client.sendFile(peer, {
-        file: uploadPath,
-        caption: file.originalname,
+        file: buffer,
+        caption: u.originalName,
         forceDocument: true,
       });
 
       const meta = extractMedia(message);
       if (meta) {
         const sender = extractSender(message);
-        store.insertMedia({
+        await store.insertMedia({
           chatId,
           messageId: message.id,
           groupedId: message.groupedId ? message.groupedId.toString() : null,
           type: meta.type,
-          mime: meta.mime,
-          fileName: meta.fileName || file.originalname,
-          fileSize: meta.fileSize || file.size,
+          mime: meta.mime || u.mime,
+          fileName: meta.fileName || u.originalName,
+          fileSize: meta.fileSize || buffer.length,
           width: meta.width,
           height: meta.height,
           duration: meta.duration,
@@ -242,58 +395,53 @@ app.post('/api/albums/:chatId/upload', upload.array('files'), asyncH(async (req,
           senderName: sender.name,
         });
 
-        const row = store.listMedia(chatId, 1, 0).find(m => m.message_id === message.id);
-        if (row) {
-          const dest = mediaPathForRow(row);
-          fs.mkdirSync(path.dirname(dest), { recursive: true });
-          fs.renameSync(uploadPath, dest);
-          store.markFileByKey(chatId, message.id);
+        // Copy from temp Key to final media key in R2
+        const finalKey = `media/${chatId}/${message.id}.${meta.ext}`;
+        await uploadToR2(finalKey, buffer, meta.mime || u.mime);
+        await store.markFileByKey(chatId, message.id);
 
-          try {
-            if (await downloadThumbToDisk(client, message, chatId, message.id)) {
-              store.markThumbByKey(chatId, message.id);
-            }
-          } catch { /* ignored */ }
+        try {
+          if (await downloadThumbToR2(client, message, chatId, message.id)) {
+            await store.markThumbByKey(chatId, message.id);
+          }
+        } catch { /* ignored */ }
 
-          results.push(row);
-        }
+        const row = (await store.listMedia(chatId, 1, 0)).find(m => m.message_id === message.id);
+        if (row) results.push(row);
       }
     } catch (err) {
-      console.error('Failed to upload file to Telegram:', err);
+      console.error('Failed to process uploaded file confirmation:', err);
     } finally {
-      try {
-        fs.rmSync(tempSubdir, { recursive: true, force: true });
-      } catch (err) {
-        console.error('Failed to clean up upload temp subdirectory:', err);
-      }
-      if (fs.existsSync(file.path)) {
-        fs.rmSync(file.path, { force: true });
-      }
+      // Clean up temp R2 upload file
+      deleteFromR2(u.r2Key).catch(() => {});
     }
   }
+
   res.json({ ok: true, added: results });
 }));
+
+// ---- ZIP downloads -------------------------------------------------------
 
 app.post('/api/media/download-zip', asyncH(async (req, res) => {
   const { ids } = req.body || {};
   if (!ids || !Array.isArray(ids) || !ids.length) {
     return res.status(400).json({ error: 'No media IDs provided' });
   }
+  const client = await getReqClient(req);
 
   const rows = [];
   for (const id of ids) {
-    const row = store.getMediaById(id);
+    const row = await store.getMediaById(id);
     if (row) rows.push(row);
   }
-  if (!rows.length) {
-    return res.status(404).json({ error: 'No matching media files found' });
-  }
+  if (!rows.length) return res.status(404).json({ error: 'No matching media files found' });
 
+  // Pre-download all uncached files into R2
   for (const row of rows) {
-    const filePath = mediaPathForRow(row);
-    if (!fs.existsSync(filePath)) {
+    const r2Key = `media/${row.chat_id}/${row.message_id}.${row.ext || 'bin'}`;
+    if (!(await existsInR2(r2Key))) {
       try {
-        await ensureFullDownload(row);
+        await ensureFullDownload(client, row);
       } catch (err) {
         console.error(`Failed to download media ${row.id} for zipping:`, err);
       }
@@ -311,10 +459,11 @@ app.post('/api/media/download-zip', asyncH(async (req, res) => {
   archive.pipe(res);
 
   for (const row of rows) {
-    const filePath = mediaPathForRow(row);
-    if (fs.existsSync(filePath)) {
+    const r2Key = `media/${row.chat_id}/${row.message_id}.${row.ext || 'bin'}`;
+    if (await existsInR2(r2Key)) {
+      const stream = await getFromR2Stream(r2Key);
       const name = row.file_name || `${row.type || 'media'}-${row.message_id}.${row.ext || 'bin'}`;
-      archive.file(filePath, { name });
+      archive.append(stream, { name });
     }
   }
 
@@ -325,7 +474,7 @@ app.post('/api/media/download-zip', asyncH(async (req, res) => {
 
 app.use(express.static(PUBLIC_DIR));
 
-// error handler (Express 5 forwards async rejections here)
+// Error handler
 app.use((err, req, res, next) => {
   if (res.headersSent) return next(err);
   const e = clientError(err);
@@ -334,7 +483,4 @@ app.use((err, req, res, next) => {
 
 app.listen(PORT, HOST, () => {
   console.log(`\n  TG Gallery running at  http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}\n`);
-  if (!hasCredentials()) {
-    console.log('  ⚠  No API credentials yet. Copy .env.example to .env and fill it in, then run: npm run login\n');
-  }
 });

@@ -33,6 +33,38 @@
     </main>
   </div>
 
+  <!-- Web Login Overlay -->
+  <div id="login-overlay" class="modal" style="background: rgba(13, 17, 23, 0.95); z-index: 10000; align-items: center; justify-content: center; display: none;">
+    <div class="modal-card" style="max-width: 400px; width: 90%; border: 1px solid #30363d; background: #0d1117; padding: 24px; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.5);">
+      <div style="text-align: center; margin-bottom: 24px;">
+        <span style="font-size: 48px;">◈</span>
+        <h2 style="margin-top: 8px; font-size: 20px;">Log in to Telegram</h2>
+        <p style="color: #8b949e; font-size: 14px; margin-top: 4px;">Connect your account to view your media gallery.</p>
+      </div>
+      
+      <!-- Step 1: Phone Input -->
+      <div id="login-step-phone">
+        <label style="display: block; margin-bottom: 8px; font-weight: 500;">Phone Number</label>
+        <input id="login-phone" class="search" type="tel" placeholder="+15551234567" style="margin-bottom: 16px; width: 100%; box-sizing: border-box;" />
+        <button id="login-send" class="btn btn-primary" style="width: 100%; margin-top: 8px; padding: 10px;">Send Code</button>
+      </div>
+
+      <!-- Step 2: Code Input -->
+      <div id="login-step-code" style="display: none;">
+        <label style="display: block; margin-bottom: 8px; font-weight: 500;">Telegram Verification Code</label>
+        <input id="login-code" class="search" type="text" placeholder="Enter code sent to Telegram…" style="margin-bottom: 16px; width: 100%; box-sizing: border-box;" />
+        
+        <label style="display: block; margin-bottom: 8px; font-weight: 500;">2FA Password (Optional)</label>
+        <input id="login-2fa" class="search" type="password" placeholder="Your two-step password…" style="margin-bottom: 16px; width: 100%; box-sizing: border-box;" />
+        
+        <button id="login-submit" class="btn btn-primary" style="width: 100%; margin-top: 8px; padding: 10px;">Log In</button>
+        <button id="login-back" class="btn" style="width: 100%; margin-top: 8px; background: transparent; border: 1px solid #30363d; color: #c9d1d9; padding: 10px;">Back</button>
+      </div>
+
+      <div id="login-error" style="color: #f85149; font-size: 14px; margin-top: 16px; text-align: center; display: none;"></div>
+    </div>
+  </div>
+
   <!-- Add-album modal -->
   <div id="modal" class="modal hidden">
     <div class="modal-card">
