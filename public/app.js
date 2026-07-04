@@ -159,6 +159,7 @@ async function selectAlbum(chatId) {
   renderMainHead();
   $('#gallery').innerHTML = '';
   $('#empty').classList.add('hidden');
+  updateHash();
   loadUploaders(chatId);
   await loadMore();
 
@@ -168,6 +169,7 @@ async function selectAlbum(chatId) {
     if (newIdx !== -1) {
       lbIndex = newIdx;
       renderLightbox();
+      updateHash();
     } else {
       closeLightbox();
     }
@@ -528,6 +530,7 @@ function openLightbox(index) {
   lbIndex = index;
   $('#lightbox').classList.remove('hidden');
   renderLightbox();
+  updateHash();
 }
 function closeLightbox() {
   lbToken++;
@@ -542,6 +545,7 @@ function closeLightbox() {
   }
   $('#lb-stage').innerHTML = '';
   lbIndex = -1;
+  updateHash();
 }
 function stepLightbox(delta) {
   const next = lbIndex + delta;
@@ -556,6 +560,7 @@ function stepLightbox(delta) {
   }
   lbIndex = next;
   renderLightbox();
+  updateHash();
   if (next >= state.media.length - 5) loadMore();
 }
 function renderLightbox() {
@@ -722,6 +727,21 @@ function wire() {
   $('#lb-close').addEventListener('click', closeLightbox);
   $('#lb-prev').addEventListener('click', () => stepLightbox(-1));
   $('#lb-next').addEventListener('click', () => stepLightbox(1));
+  $('#lb-share').addEventListener('click', () => {
+    const shareUrl = window.location.href;
+    navigator.clipboard.writeText(shareUrl).then(() => {
+      const shareBtn = $('#lb-share');
+      const oldText = shareBtn.innerHTML;
+      shareBtn.innerHTML = '✓ Copied!';
+      shareBtn.style.color = '#3fb950';
+      setTimeout(() => {
+        shareBtn.innerHTML = oldText;
+        shareBtn.style.color = '';
+      }, 1500);
+    }).catch(err => {
+      alert('Failed to copy link: ' + err.message);
+    });
+  });
   document.addEventListener('keydown', (e) => {
     if ($('#lightbox').classList.contains('hidden')) return;
     if (e.key === 'Escape') closeLightbox();
@@ -954,7 +974,97 @@ function showWelcomeEmpty() {
       : 'First, add <code>TG_API_ID</code> and <code>TG_API_HASH</code> to a <code>.env</code> file (see .env.example), then run <code>npm run login</code>.');
 }
 
+let currentHashStr = '';
+
+function parseHash() {
+  const hash = window.location.hash.substring(1);
+  const params = new URLSearchParams(hash);
+  return {
+    album: params.get('album') || null,
+    media: params.get('media') || null,
+  };
+}
+
+function updateHash() {
+  let newHash = '';
+  if (state.current) {
+    newHash = `album=${state.current}`;
+    const isLightboxOpen = !$('#lightbox').classList.contains('hidden');
+    if (isLightboxOpen && state.media[lbIndex]) {
+      newHash += `&media=${state.media[lbIndex].id}`;
+    }
+  }
+  if (window.location.hash !== `#${newHash}`) {
+    currentHashStr = `#${newHash}`;
+    window.location.hash = newHash;
+  }
+}
+
+async function handleHashChange() {
+  if (window.location.hash === currentHashStr) return;
+  currentHashStr = window.location.hash;
+
+  const parsed = parseHash();
+  if (!parsed.album) return;
+  if (!canUseTelegram()) return;
+
+  const albumExists = state.albums.some(a => a.chat_id === parsed.album);
+  if (!albumExists) return;
+
+  if (state.current !== parsed.album) {
+    await selectAlbum(parsed.album);
+  }
+
+  if (parsed.media) {
+    let idx = state.media.findIndex(m => String(m.id) === String(parsed.media));
+    if (idx === -1) {
+      try {
+        const item = await api(`/api/media/${parsed.media}`);
+        if (String(item.chat_id) === String(parsed.album)) {
+          state.media.unshift(item);
+          renderGallery();
+          idx = 0;
+        }
+      } catch (err) {
+        console.error('Failed to load shared media:', err);
+      }
+    }
+    if (idx !== -1) {
+      openLightbox(idx);
+    }
+  } else {
+    closeLightbox();
+  }
+}
+
+window.addEventListener('hashchange', handleHashChange);
+
 async function ensurePresetAndSelect() {
+  const parsed = parseHash();
+  if (parsed.album && state.albums.some(a => a.chat_id === parsed.album)) {
+    currentHashStr = window.location.hash;
+    await selectAlbum(parsed.album);
+    if (parsed.media) {
+      let idx = state.media.findIndex(m => String(m.id) === String(parsed.media));
+      if (idx === -1) {
+        try {
+          const item = await api(`/api/media/${parsed.media}`);
+          if (String(item.chat_id) === String(parsed.album)) {
+            state.media.unshift(item);
+            renderGallery();
+            idx = 0;
+          }
+        } catch (err) {
+          console.error('Failed to load shared media:', err);
+        }
+      }
+      if (idx !== -1) {
+        openLightbox(idx);
+      }
+    }
+    return;
+  }
+
   const preset = state.status?.presetGroup;
   if (preset) {
     const existing = state.albums.find((a) => presetMatches(a, preset));

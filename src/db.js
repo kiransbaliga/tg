@@ -72,6 +72,8 @@ async function runMigrations() {
       ON CONFLICT (sender_id) DO NOTHING;
     `;
 
+    await sql`ALTER TABLE media ADD COLUMN IF NOT EXISTS downloaded_at INTEGER;`;
+
     console.log('✓ Supabase PostgreSQL migrations completed successfully.');
   } catch (err) {
     console.error('✗ Failed to run Supabase PostgreSQL migrations:', err);
@@ -333,10 +335,28 @@ export async function markThumbByKey(chatId, messageId) {
 
 export async function markFileByKey(chatId, messageId) {
   ensureDb();
-  await sql`UPDATE media SET file_downloaded = 1 WHERE chat_id = ${String(chatId)} AND message_id = ${Number(messageId)}`;
+  await sql`UPDATE media SET file_downloaded = 1, downloaded_at = ${nowSec()} WHERE chat_id = ${String(chatId)} AND message_id = ${Number(messageId)}`;
 }
 
 export async function deleteMediaRow(id) {
   ensureDb();
   await sql`DELETE FROM media WHERE id = ${Number(id)}`;
+}
+
+export async function listExpiredDownloads(maxAgeSeconds) {
+  ensureDb();
+  const cutoff = nowSec() - maxAgeSeconds;
+  return sql`
+    SELECT * FROM media 
+    WHERE file_downloaded = 1 AND downloaded_at IS NOT NULL AND downloaded_at < ${cutoff}
+  `;
+}
+
+export async function resetFileDownloaded(id) {
+  ensureDb();
+  await sql`
+    UPDATE media 
+    SET file_downloaded = 0, downloaded_at = NULL 
+    WHERE id = ${Number(id)}
+  `;
 }

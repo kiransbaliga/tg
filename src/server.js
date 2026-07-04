@@ -302,6 +302,13 @@ app.get('/api/albums/:chatId/media', asyncH(async (req, res) => {
   res.json({ items, total, limit, offset });
 }));
 
+app.get('/api/media/:id', asyncH(async (req, res) => {
+  const row = await store.getMediaById(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Media not found' });
+  await verifyAccess(req, row.chat_id);
+  res.json(row);
+}));
+
 // ---- media bytes (R2 redirects with on-demand background cache) ----------
 
 app.get('/api/media/:id/thumb', asyncH(async (req, res) => {
@@ -706,6 +713,33 @@ app.use((err, req, res, next) => {
   const e = clientError(err);
   res.status(e.status).json({ error: e.error });
 });
+
+// ---- background R2 cache cleanup (runs every 15 minutes, deletes cached full media older than 2 hours) ----
+const CACHE_CLEANUP_INTERVAL = 15 * 60 * 1000; // 15 mins
+const MAX_CACHE_AGE_SECONDS = 2 * 60 * 60;    // 2 hours
+
+setInterval(async () => {
+  try {
+    const expired = await store.listExpiredDownloads(MAX_CACHE_AGE_SECONDS);
+    if (expired.length > 0) {
+      console.log(`[Cache Cleanup] Found ${expired.length} expired file(s) in R2 cache.`);
+      for (const row of expired) {
+        const r2Key = `media/${row.chat_id}/${row.message_id}.${row.ext || 'bin'}`;
+        try {
+          if (await existsInR2(r2Key)) {
+            await deleteFromR2(r2Key);
+          }
+          await store.resetFileDownloaded(row.id);
+          console.log(`[Cache Cleanup] Successfully deleted ${r2Key} from R2 and reset DB flag.`);
+        } catch (err) {
+          console.error(`[Cache Cleanup] Failed to delete ${r2Key} from R2:`, err);
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[Cache Cleanup] Failed to run expired cache cleanup:', err);
+  }
+}, CACHE_CLEANUP_INTERVAL);
 
 // Bind explicitly to HOST (0.0.0.0 by default) so hosting platforms like Render
 // can detect the open port — they probe 0.0.0.0:$PORT, not 127.0.0.1.

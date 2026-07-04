@@ -164,6 +164,8 @@ a { color: inherit; }
 .lb-caption { font-size: 14px; max-width: 70%; white-space: pre-wrap; overflow: hidden; max-height: 60px; }
 .lb-download { background: rgba(255, 255, 255, .12); padding: 9px 16px; border-radius: 8px; text-decoration: none; font-size: 13px; font-weight: 600; white-space: nowrap; }
 .lb-download:hover { background: rgba(255, 255, 255, .24); }
+.lb-share-btn { background: rgba(255, 255, 255, .12); border: none; color: #e7eaee; padding: 9px 16px; border-radius: 8px; font-size: 13px; font-weight: 600; white-space: nowrap; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: color 0.15s ease; }
+.lb-share-btn:hover { background: rgba(255, 255, 255, .24); }
 
 /* ---- selection & multi-select ---- */
 .tile-checkbox {
@@ -376,6 +378,7 @@ a { color: inherit; }
   .lb-bar { padding: 8px 12px 16px; flex-wrap: wrap; gap: 8px; }
   .lb-caption { max-width: 100%; font-size: 13px; }
   .lb-download { font-size: 12px; padding: 7px 12px; }
+  .lb-share-btn { font-size: 12px; padding: 7px 12px; }
   .lb-prev { left: 4px; }
   .lb-next { right: 4px; }
   .lb-close { top: 8px; right: 8px; }
