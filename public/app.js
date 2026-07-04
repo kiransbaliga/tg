@@ -729,7 +729,37 @@ function wire() {
   $('#lb-next').addEventListener('click', () => stepLightbox(1));
   $('#lb-share').addEventListener('click', () => {
     const shareUrl = window.location.href;
-    navigator.clipboard.writeText(shareUrl).then(() => {
+    
+    const copyToClipboard = (text) => {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(text);
+      }
+      // Fallback for insecure contexts (HTTP IP, etc.)
+      return new Promise((resolve, reject) => {
+        try {
+          const textArea = document.createElement('textarea');
+          textArea.value = text;
+          textArea.style.top = '0';
+          textArea.style.left = '0';
+          textArea.style.position = 'fixed';
+          textArea.style.opacity = '0';
+          document.body.appendChild(textArea);
+          textArea.focus();
+          textArea.select();
+          const successful = document.execCommand('copy');
+          document.body.removeChild(textArea);
+          if (successful) {
+            resolve();
+          } else {
+            reject(new Error('execCommand copy failed'));
+          }
+        } catch (err) {
+          reject(err);
+        }
+      });
+    };
+
+    copyToClipboard(shareUrl).then(() => {
       const shareBtn = $('#lb-share');
       const oldText = shareBtn.innerHTML;
       shareBtn.innerHTML = '✓ Copied!';
