@@ -718,7 +718,7 @@ app.use((err, req, res, next) => {
 const CACHE_CLEANUP_INTERVAL = 15 * 60 * 1000; // 15 mins
 const MAX_CACHE_AGE_SECONDS = 2 * 60 * 60;    // 2 hours
 
-setInterval(async () => {
+async function cleanExpiredCache() {
   try {
     const expired = await store.listExpiredDownloads(MAX_CACHE_AGE_SECONDS);
     if (expired.length > 0) {
@@ -739,7 +739,13 @@ setInterval(async () => {
   } catch (err) {
     console.error('[Cache Cleanup] Failed to run expired cache cleanup:', err);
   }
-}, CACHE_CLEANUP_INTERVAL);
+}
+
+// Run cleanup immediately on startup to purge any stale files from previous spins
+cleanExpiredCache();
+
+// Maintain active cleanup interval while the service is running
+setInterval(cleanExpiredCache, CACHE_CLEANUP_INTERVAL);
 
 // Bind explicitly to HOST (0.0.0.0 by default) so hosting platforms like Render
 // can detect the open port — they probe 0.0.0.0:$PORT, not 127.0.0.1.
