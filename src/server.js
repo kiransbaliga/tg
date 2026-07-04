@@ -329,9 +329,16 @@ app.get('/api/media/:id/thumb', asyncH(async (req, res) => {
     if (message && await downloadThumbToR2(client, message, row.chat_id, row.message_id)) {
       await store.markThumbByKey(row.chat_id, row.message_id);
       return res.redirect(publicUrl);
+    } else {
+      if (!message) {
+        await store.deleteMediaRow(row.id);
+      }
     }
   } catch (err) {
     console.error('Failed to download thumb on demand:', err);
+    if (err?.message === 'MESSAGE_NOT_FOUND' || err?.message?.includes('message not found') || err?.message?.includes('CHAT_ADMIN_REQUIRED')) {
+      await store.deleteMediaRow(row.id);
+    }
   }
   res.status(404).end();
 }));
@@ -410,6 +417,9 @@ app.get('/api/media/:id/file', asyncH(async (req, res) => {
     await ensureFullDownload(client, row);
     return deliver(r2Key);
   } catch (err) {
+    if (err?.message === 'MESSAGE_NOT_FOUND' || err?.message?.includes('message not found') || err?.message?.includes('CHAT_ADMIN_REQUIRED')) {
+      await store.deleteMediaRow(row.id).catch(() => {});
+    }
     const e = clientError(err);
     res.status(e.status).json({ error: e.error });
   }
@@ -544,6 +554,9 @@ app.post('/api/media/download-zip', asyncH(async (req, res) => {
         await ensureFullDownload(client, row);
       } catch (err) {
         console.error(`Failed to download media ${row.id} for zipping:`, err);
+        if (err?.message === 'MESSAGE_NOT_FOUND' || err?.message?.includes('message not found') || err?.message?.includes('CHAT_ADMIN_REQUIRED')) {
+          await store.deleteMediaRow(row.id).catch(() => {});
+        }
       }
     }
   }

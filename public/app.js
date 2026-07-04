@@ -137,6 +137,11 @@ function escapeHtml(s) {
 async function selectAlbum(chatId) {
   state.gen++;              // abandon any in-flight load for the previous album
   state.loading = false;
+
+  // Preserve lightbox state if active
+  const isLightboxOpen = !$('#lightbox').classList.contains('hidden');
+  const activeMediaId = isLightboxOpen && state.media[lbIndex] ? state.media[lbIndex].id : null;
+
   state.current = chatId;
   state.media = [];
   state.offset = 0;
@@ -156,6 +161,17 @@ async function selectAlbum(chatId) {
   $('#empty').classList.add('hidden');
   loadUploaders(chatId);
   await loadMore();
+
+  // Restore lightbox state if it was open
+  if (isLightboxOpen && activeMediaId !== null) {
+    const newIdx = state.media.findIndex(m => m.id === activeMediaId);
+    if (newIdx !== -1) {
+      lbIndex = newIdx;
+      renderLightbox();
+    } else {
+      closeLightbox();
+    }
+  }
 }
 
 async function loadUploaders(chatId) {
@@ -235,9 +251,20 @@ async function loadMore() {
     const senderQ = state.filterSender ? `&sender=${encodeURIComponent(state.filterSender)}` : '';
     const data = await api(`/api/albums/${chatId}/media?limit=${state.pageSize}&offset=${state.offset}${senderQ}`);
     if (gen !== state.gen) return; // album switched mid-fetch — discard this stale page
+    
     state.total = data.total;
     state.offset += data.items.length;
-    state.media.push(...data.items);
+
+    // Prevent duplicate entries by checking database 'id'
+    const existingIds = new Set(state.media.map(m => m.id));
+    const newItems = data.items.filter(m => !existingIds.has(m.id));
+    state.media.push(...newItems);
+
+    // If we loaded no items, stop further infinite scroll triggers
+    if (data.items.length === 0) {
+      state.total = state.media.length;
+    }
+
     renderGallery();
     renderMainHead();
     if (!state.media.length) showEmptyForAlbum();
@@ -406,8 +433,16 @@ async function pollSync(chatId) {
     await loadAlbums();
     if (chatId === state.current) {
       loadUploaders(chatId);
-      const keep = state.current;
-      await selectAlbum(keep);
+      const mainEl = $('.main');
+      const isScrolledDown = mainEl && mainEl.scrollTop > 100;
+      const isLightboxOpen = !$('#lightbox').classList.contains('hidden');
+      if (isScrolledDown || isLightboxOpen) {
+        renderMainHead();
+        renderSidebar();
+      } else {
+        const keep = state.current;
+        await selectAlbum(keep);
+      }
     } else {
       renderMainHead();
     }

@@ -57,6 +57,21 @@ async function runMigrations() {
     await sql`CREATE INDEX IF NOT EXISTS idx_media_chat_date ON media(chat_id, date DESC, message_id DESC);`;
     await sql`CREATE INDEX IF NOT EXISTS idx_media_sender ON media(chat_id, sender_id);`;
 
+    await sql`
+      CREATE TABLE IF NOT EXISTS senders (
+        sender_id   TEXT PRIMARY KEY,
+        sender_name TEXT NOT NULL
+      );
+    `;
+
+    await sql`
+      INSERT INTO senders (sender_id, sender_name)
+      SELECT DISTINCT ON (sender_id) sender_id, sender_name
+      FROM media
+      WHERE sender_id IS NOT NULL AND sender_name IS NOT NULL AND TRIM(sender_name) != ''
+      ON CONFLICT (sender_id) DO NOTHING;
+    `;
+
     console.log('✓ Supabase PostgreSQL migrations completed successfully.');
   } catch (err) {
     console.error('✗ Failed to run Supabase PostgreSQL migrations:', err);
@@ -142,6 +157,22 @@ export async function resetAlbumSync(chatId) {
 
 export async function insertMedia(row) {
   ensureDb();
+
+  if (row.senderId && row.senderName && String(row.senderName).trim()) {
+    const senderName = String(row.senderName).trim();
+    await sql`
+      INSERT INTO senders (sender_id, sender_name)
+      VALUES (${String(row.senderId)}, ${senderName})
+      ON CONFLICT (sender_id) DO UPDATE SET
+        sender_name = CASE 
+          WHEN EXCLUDED.sender_name LIKE '% %' AND senders.sender_name NOT LIKE '% %' THEN EXCLUDED.sender_name
+          WHEN senders.sender_name LIKE '% %' AND EXCLUDED.sender_name NOT LIKE '% %' THEN senders.sender_name
+          WHEN LENGTH(EXCLUDED.sender_name) > LENGTH(senders.sender_name) THEN EXCLUDED.sender_name
+          ELSE senders.sender_name
+        END
+    `;
+  }
+
   const result = await sql`
     INSERT INTO media
       (chat_id, message_id, grouped_id, type, mime, file_name, file_size,
@@ -181,7 +212,12 @@ export async function insertMedia(row) {
 
 export async function getMediaById(id) {
   ensureDb();
-  const rows = await sql`SELECT * FROM media WHERE id = ${Number(id)}`;
+  const rows = await sql`
+    SELECT m.*, COALESCE(s.sender_name, m.sender_name) AS sender_name
+    FROM media m
+    LEFT JOIN senders s ON m.sender_id = s.sender_id
+    WHERE m.id = ${Number(id)}
+  `;
   return rows[0] || null;
 }
 
@@ -189,24 +225,54 @@ export async function listMedia(chatId, limit, offset, senderId) {
   ensureDb();
   if (senderId) {
     return sql`
-      SELECT id, chat_id, message_id, type, mime, file_name, file_size,
-             width, height, duration, caption, date, ext,
-             sender_id, sender_name,
-             thumb_downloaded, file_downloaded
-      FROM media
-      WHERE chat_id = ${String(chatId)} AND sender_id = ${String(senderId)}
-      ORDER BY date DESC, message_id DESC
+      WITH ranked_media AS (
+        SELECT id, chat_id, message_id, type, mime, file_name, file_size,
+               width, height, duration, caption, date, ext,
+               sender_id, sender_name,
+               thumb_downloaded, file_downloaded,
+               ROW_NUMBER() OVER (
+                 PARTITION BY chat_id, 
+                              COALESCE(file_name, 'PHOTO_' || COALESCE(date, 0) || '_' || COALESCE(width, 0) || '_' || COALESCE(height, 0)),
+                              COALESCE(file_size, 0)
+                 ORDER BY file_downloaded DESC, thumb_downloaded DESC, message_id DESC
+               ) as rn
+        FROM media
+        WHERE chat_id = ${String(chatId)} AND sender_id = ${String(senderId)}
+      )
+      SELECT m.id, m.chat_id, m.message_id, m.type, m.mime, m.file_name, m.file_size,
+             m.width, m.height, m.duration, m.caption, m.date, m.ext,
+             m.sender_id, COALESCE(s.sender_name, m.sender_name) AS sender_name,
+             m.thumb_downloaded, m.file_downloaded
+      FROM ranked_media m
+      LEFT JOIN senders s ON m.sender_id = s.sender_id
+      WHERE m.rn = 1
+      ORDER BY m.date DESC, m.message_id DESC
       LIMIT ${Number(limit)} OFFSET ${Number(offset)}
     `;
   }
   return sql`
-    SELECT id, chat_id, message_id, type, mime, file_name, file_size,
-           width, height, duration, caption, date, ext,
-           sender_id, sender_name,
-           thumb_downloaded, file_downloaded
-    FROM media
-    WHERE chat_id = ${String(chatId)}
-    ORDER BY date DESC, message_id DESC
+    WITH ranked_media AS (
+      SELECT id, chat_id, message_id, type, mime, file_name, file_size,
+             width, height, duration, caption, date, ext,
+             sender_id, sender_name,
+             thumb_downloaded, file_downloaded,
+             ROW_NUMBER() OVER (
+               PARTITION BY chat_id, 
+                            COALESCE(file_name, 'PHOTO_' || COALESCE(date, 0) || '_' || COALESCE(width, 0) || '_' || COALESCE(height, 0)),
+                            COALESCE(file_size, 0)
+               ORDER BY file_downloaded DESC, thumb_downloaded DESC, message_id DESC
+             ) as rn
+      FROM media
+      WHERE chat_id = ${String(chatId)}
+    )
+    SELECT m.id, m.chat_id, m.message_id, m.type, m.mime, m.file_name, m.file_size,
+           m.width, m.height, m.duration, m.caption, m.date, m.ext,
+           m.sender_id, COALESCE(s.sender_name, m.sender_name) AS sender_name,
+           m.thumb_downloaded, m.file_downloaded
+    FROM ranked_media m
+    LEFT JOIN senders s ON m.sender_id = s.sender_id
+    WHERE m.rn = 1
+    ORDER BY m.date DESC, m.message_id DESC
     LIMIT ${Number(limit)} OFFSET ${Number(offset)}
   `;
 }
@@ -214,24 +280,48 @@ export async function listMedia(chatId, limit, offset, senderId) {
 export async function countMedia(chatId, senderId) {
   ensureDb();
   if (senderId) {
-    const rows = await sql`SELECT COUNT(*)::int AS c FROM media WHERE chat_id = ${String(chatId)} AND sender_id = ${String(senderId)}`;
+    const rows = await sql`
+      WITH ranked_media AS (
+        SELECT id,
+               ROW_NUMBER() OVER (
+                 PARTITION BY chat_id, 
+                              COALESCE(file_name, 'PHOTO_' || COALESCE(date, 0) || '_' || COALESCE(width, 0) || '_' || COALESCE(height, 0)),
+                              COALESCE(file_size, 0)
+                 ORDER BY file_downloaded DESC, thumb_downloaded DESC, message_id DESC
+               ) as rn
+        FROM media
+        WHERE chat_id = ${String(chatId)} AND sender_id = ${String(senderId)}
+      )
+      SELECT COUNT(*)::int AS c FROM ranked_media WHERE rn = 1
+    `;
     return rows[0]?.c || 0;
   }
-  const rows = await sql`SELECT COUNT(*)::int AS c FROM media WHERE chat_id = ${String(chatId)}`;
+  const rows = await sql`
+    WITH ranked_media AS (
+      SELECT id,
+             ROW_NUMBER() OVER (
+               PARTITION BY chat_id, 
+                            COALESCE(file_name, 'PHOTO_' || COALESCE(date, 0) || '_' || COALESCE(width, 0) || '_' || COALESCE(height, 0)),
+                            COALESCE(file_size, 0)
+               ORDER BY file_downloaded DESC, thumb_downloaded DESC, message_id DESC
+             ) as rn
+      FROM media
+      WHERE chat_id = ${String(chatId)}
+    )
+    SELECT COUNT(*)::int AS c FROM ranked_media WHERE rn = 1
+  `;
   return rows[0]?.c || 0;
 }
 
 export async function listUploaders(chatId) {
   ensureDb();
-  // Postgres requires every selected column to be aggregated or grouped; unlike
-  // SQLite it won't silently pick a sender_name. Group by sender_id only and take
-  // MAX(sender_name) so a person whose messages have mixed null/non-null names
-  // collapses to a single uploader entry instead of several.
+  // Join senders table to get the unified sender name if it exists, falling back to media.sender_name
   return sql`
-    SELECT sender_id, MAX(sender_name) AS sender_name, COUNT(*)::int AS media_count
-    FROM media
-    WHERE chat_id = ${String(chatId)} AND sender_id IS NOT NULL
-    GROUP BY sender_id
+    SELECT m.sender_id, COALESCE(MAX(s.sender_name), MAX(m.sender_name)) AS sender_name, COUNT(*)::int AS media_count
+    FROM media m
+    LEFT JOIN senders s ON m.sender_id = s.sender_id
+    WHERE m.chat_id = ${String(chatId)} AND m.sender_id IS NOT NULL
+    GROUP BY m.sender_id
     ORDER BY media_count DESC
   `;
 }
@@ -244,4 +334,9 @@ export async function markThumbByKey(chatId, messageId) {
 export async function markFileByKey(chatId, messageId) {
   ensureDb();
   await sql`UPDATE media SET file_downloaded = 1 WHERE chat_id = ${String(chatId)} AND message_id = ${Number(messageId)}`;
+}
+
+export async function deleteMediaRow(id) {
+  ensureDb();
+  await sql`DELETE FROM media WHERE id = ${Number(id)}`;
 }
