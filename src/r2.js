@@ -40,6 +40,18 @@ export async function uploadToR2(key, body, mime) {
   await s3.send(command);
 }
 
+export async function uploadStreamToR2(key, stream, mime, size) {
+  ensureR2();
+  const command = new PutObjectCommand({
+    Bucket: R2_BUCKET_NAME,
+    Key: key,
+    Body: stream,
+    ContentType: mime,
+    ContentLength: size,
+  });
+  await s3.send(command);
+}
+
 export async function existsInR2(key) {
   ensureR2();
   try {

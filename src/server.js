@@ -1,5 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { PassThrough } from 'node:stream';
+import bigInt from 'big-integer';
 import heicConvert from 'heic-convert';
 import express from 'express';
 import { ZipArchive } from 'archiver';
@@ -9,9 +11,9 @@ import {
   getClient, getMe, listDialogs, resolveEntity, buildInputPeer,
   ensureFullDownload, downloadThumbToR2, extractMedia, extractSender,
 } from './telegram.js';
-import { existsInR2, uploadToR2, getFromR2Stream, getPresignedUploadUrl, deleteFromR2 } from './r2.js';
+import { existsInR2, uploadToR2, getFromR2Stream, getPresignedUploadUrl, deleteFromR2, uploadStreamToR2 } from './r2.js';
 import { syncAlbum, getSyncStatus } from './sync.js';
-import { TelegramClient, Api } from 'telegram';
+import { TelegramClient, Api, client as tgClient } from 'telegram';
 import { StringSession } from 'telegram/sessions/index.js';
 import { CustomFile } from 'telegram/client/uploads.js';
 
@@ -398,6 +400,9 @@ app.get('/api/media/:id/file', asyncH(async (req, res) => {
     const stream = await getFromR2Stream(key);
     res.setHeader('Content-Type', contentType || row.mime || 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    if (row.file_size) {
+      res.setHeader('Content-Length', row.file_size.toString());
+    }
     stream.on('error', () => { if (res.headersSent) res.destroy(); else res.status(502).end(); });
     return stream.pipe(res);
   };
@@ -411,17 +416,125 @@ app.get('/api/media/:id/file', asyncH(async (req, res) => {
     return deliver(r2Key);
   }
 
-  // Lazy download from Telegram to R2
+  // Lazy download from Telegram to R2 with instant streaming (handles ranges for videos/inline view, and progress headers for downloads)
   try {
     const client = await getReqClient(req);
-    await ensureFullDownload(client, row);
-    return deliver(r2Key);
+    
+    // Parse Range header if present
+    const rangeHeader = req.headers.range;
+    let start = 0;
+    let end = row.file_size ? Number(row.file_size) - 1 : null;
+    let isRange = false;
+
+    if (rangeHeader && row.file_size) {
+      const parts = rangeHeader.replace(/bytes=/, "").split("-");
+      const partialStart = parts[0];
+      const partialEnd = parts[1];
+      start = Number.parseInt(partialStart, 10);
+      end = partialEnd ? Number.parseInt(partialEnd, 10) : Number(row.file_size) - 1;
+      isRange = true;
+    }
+
+    const chunkLimit = end !== null ? (end - start + 1) : undefined;
+
+    res.setHeader('Content-Type', row.mime || 'application/octet-stream');
+    res.setHeader('Accept-Ranges', 'bytes');
+
+    if (isRange && row.file_size) {
+      res.status(206);
+      res.setHeader('Content-Range', `bytes ${start}-${end}/${row.file_size}`);
+      res.setHeader('Content-Length', chunkLimit.toString());
+    } else if (row.file_size) {
+      res.setHeader('Content-Length', row.file_size.toString());
+    }
+
+    if (isDownload) {
+      const filename = (row.file_name || `media-${row.id}.${row.ext || 'bin'}`).replace(/["\\\r\n]/g, '');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    }
+
+    const peer = buildInputPeer(await store.getAlbum(row.chat_id));
+    const messages = await client.getMessages(peer, { ids: [Number(row.message_id)] });
+    const message = messages && messages[0];
+    if (!message || !message.media) {
+      throw new Error('MESSAGE_NOT_FOUND');
+    }
+
+    // Stream background caching to R2 only if it's a full request.
+    // If it's a range/partial request (e.g. video scrub/preview), trigger ensureFullDownload in the background.
+    let passThrough = null;
+    let uploadPromise = null;
+    let completed = false;
+
+    const triggerBackgroundCache = () => {
+      ensureFullDownload(client, row).catch((err) => {
+        console.error('Background cache download failed:', err);
+      });
+    };
+
+    if (!isRange && row.file_size) {
+      passThrough = new PassThrough();
+      
+      res.on('close', () => {
+        if (!completed) {
+          passThrough.destroy();
+          deleteFromR2(r2Key).catch(() => {});
+        }
+      });
+
+      uploadPromise = uploadStreamToR2(r2Key, passThrough, row.mime || 'application/octet-stream', row.file_size)
+        .then(async () => {
+          if (completed) {
+            await store.markFileByKey(row.chat_id, row.message_id);
+          }
+        })
+        .catch((err) => {
+          console.error('Background R2 upload failed:', err);
+        });
+    } else {
+      triggerBackgroundCache();
+    }
+
+    try {
+      const downloadStream = tgClient.downloads.iterDownload(client, {
+        file: message.media,
+        offset: bigInt(start),
+        limit: chunkLimit ? bigInt(chunkLimit) : undefined,
+        requestSize: 512 * 1024, // 512KB chunks
+      });
+
+      for await (const chunk of downloadStream) {
+        res.write(chunk);
+        if (passThrough) {
+          passThrough.write(chunk);
+        }
+      }
+      res.end();
+      if (passThrough) {
+        passThrough.end();
+      }
+      completed = true;
+      if (uploadPromise) {
+        await uploadPromise;
+      }
+    } catch (err) {
+      completed = false;
+      if (passThrough) {
+        passThrough.destroy();
+        deleteFromR2(r2Key).catch(() => {});
+      }
+      throw err;
+    }
   } catch (err) {
     if (err?.message === 'MESSAGE_NOT_FOUND' || err?.message?.includes('message not found') || err?.message?.includes('CHAT_ADMIN_REQUIRED')) {
       await store.deleteMediaRow(row.id).catch(() => {});
     }
     const e = clientError(err);
-    res.status(e.status).json({ error: e.error });
+    if (!res.headersSent) {
+      res.status(e.status).json({ error: e.error });
+    } else {
+      res.destroy();
+    }
   }
 }));
 
