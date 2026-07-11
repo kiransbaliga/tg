@@ -333,6 +333,8 @@ function renderMainHead() {
     $('#btn-sync-album').style.display = 'none';
     $('#btn-upload-media').style.display = 'none';
     $('#btn-select-mode').style.display = 'none';
+    const removeBtn = $('#btn-remove-album');
+    if (removeBtn) removeBtn.style.display = 'none';
     const headerSelect = $('#header-uploader-filter');
     if (headerSelect) headerSelect.style.display = 'none';
     $('#spotlight-section').classList.add('hidden');
@@ -350,10 +352,12 @@ function renderMainHead() {
   const syncBtn = $('#btn-sync-album');
   const uploadBtn = $('#btn-upload-media');
   const selectBtn = $('#btn-select-mode');
+  const removeBtn = $('#btn-remove-album');
   
   syncBtn.style.display = '';
   uploadBtn.style.display = '';
   selectBtn.style.display = '';
+  if (removeBtn) removeBtn.style.display = '';
   
   const syncing = state.syncTimers.has(a.chat_id);
   syncBtn.textContent = syncing ? '↻ Syncing…' : '↻ Sync';
@@ -386,25 +390,14 @@ function renderMainHead() {
   renderSpotlightSection(a);
 }
 
-function renderSpotlightSection(album) {
-  const spotlightSection = $('#spotlight-section');
-  if (!state.media.length) {
-    spotlightSection.classList.add('hidden');
-    return;
-  }
-  spotlightSection.classList.remove('hidden');
-  
-  // 1. Spotlight Media Card (first item in the album)
-  const spotlightMedia = $('#spotlight-media-card');
-  spotlightMedia.innerHTML = '';
-  
-  const it = state.media[0];
-  const idx = 0;
-  
-  const tile = el('div', 'tile');
-  tile.style.width = '100%';
-  tile.style.height = '100%';
-  tile.dataset.index = idx;
+function makeCollageItem(it, idx, totalCount = 0, isLast = false) {
+  const itemEl = el('div', 'collage-item');
+  itemEl.style.position = 'relative';
+  itemEl.style.width = '100%';
+  itemEl.style.height = '100%';
+  itemEl.style.cursor = 'pointer';
+  itemEl.style.overflow = 'hidden';
+  itemEl.dataset.index = idx;
   
   const img = el('img');
   img.loading = 'lazy';
@@ -414,6 +407,7 @@ function renderSpotlightSection(album) {
   img.style.width = '100%';
   img.style.height = '100%';
   img.style.objectFit = 'cover';
+  img.style.transition = 'transform 0.2s ease';
   
   img.addEventListener('error', () => {
     img.remove();
@@ -427,27 +421,130 @@ function renderSpotlightSection(album) {
       v.style.width = '100%';
       v.style.height = '100%';
       v.style.objectFit = 'cover';
-      tile.prepend(v);
+      itemEl.prepend(v);
     } else {
-      tile.classList.add('noimg');
+      itemEl.classList.add('noimg');
       let icon = '🖼️';
       if (it.type === 'video') icon = '🎬';
       else if (it.type === 'document') icon = '📄';
-      tile.prepend(el('div', null, icon));
+      const pl = el('div', null, icon);
+      pl.style.display = 'grid';
+      pl.style.placeItems = 'center';
+      pl.style.height = '100%';
+      pl.style.color = '#94a3b8';
+      pl.style.background = '#334155';
+      itemEl.prepend(pl);
     }
   }, { once: true });
   
-  tile.append(img);
+  itemEl.append(img);
   
   if (it.type === 'video') {
     const play = el('div', 'play', '<span>▶</span>');
-    tile.append(play);
-    if (it.duration) tile.append(el('div', 'badge', fmtDuration(it.duration)));
-  } else if (it.type === 'gif') {
-    tile.append(el('div', 'badge', 'GIF'));
+    itemEl.append(play);
   }
   
-  spotlightMedia.append(tile);
+  if (isLast && totalCount > 4) {
+    const overlay = el('div', 'collage-overlay');
+    overlay.style.position = 'absolute';
+    overlay.style.inset = '0';
+    overlay.style.background = 'rgba(15, 23, 42, 0.6)';
+    overlay.style.backdropFilter = 'blur(2px)';
+    overlay.style.display = 'flex';
+    overlay.style.alignItems = 'center';
+    overlay.style.justifyContent = 'center';
+    overlay.style.color = '#ffffff';
+    overlay.style.fontSize = '24px';
+    overlay.style.fontWeight = '700';
+    overlay.textContent = `+${totalCount - 4}`;
+    itemEl.append(overlay);
+  }
+  
+  itemEl.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openLightbox(idx);
+  });
+  
+  return itemEl;
+}
+
+function renderSpotlightSection(album) {
+  const spotlightSection = $('#spotlight-section');
+  if (!state.media.length) {
+    spotlightSection.classList.add('hidden');
+    return;
+  }
+  spotlightSection.classList.remove('hidden');
+  
+  // 1. Spotlight Left: Render collage inside spotlight card
+  const spotlightMedia = $('#spotlight-media-card');
+  spotlightMedia.innerHTML = '';
+  
+  const totalMedia = state.media.length;
+  const itemsToUse = state.media.slice(0, Math.min(totalMedia, 4));
+  
+  const collageWrapper = el('div', 'spotlight-collage');
+  collageWrapper.style.display = 'flex';
+  collageWrapper.style.width = '100%';
+  collageWrapper.style.height = '100%';
+  collageWrapper.style.gap = '4px';
+  collageWrapper.style.background = '#0f172a';
+  
+  if (itemsToUse.length === 1) {
+    collageWrapper.append(makeCollageItem(itemsToUse[0], 0, totalMedia, false));
+  } else if (itemsToUse.length === 2) {
+    const col1 = el('div');
+    col1.style.flex = '1';
+    col1.style.height = '100%';
+    col1.append(makeCollageItem(itemsToUse[0], 0));
+    
+    const col2 = el('div');
+    col2.style.flex = '1';
+    col2.style.height = '100%';
+    col2.append(makeCollageItem(itemsToUse[1], 1));
+    
+    collageWrapper.append(col1, col2);
+  } else if (itemsToUse.length === 3) {
+    const colLeft = el('div');
+    colLeft.style.flex = '1.2';
+    colLeft.style.height = '100%';
+    colLeft.append(makeCollageItem(itemsToUse[0], 0));
+    
+    const colRight = el('div');
+    colRight.style.width = '40%';
+    colRight.style.height = '100%';
+    colRight.style.display = 'flex';
+    colRight.style.flexDirection = 'column';
+    colRight.style.gap = '4px';
+    
+    const cell1 = el('div'); cell1.style.flex = '1'; cell1.append(makeCollageItem(itemsToUse[1], 1));
+    const cell2 = el('div'); cell2.style.flex = '1'; cell2.append(makeCollageItem(itemsToUse[2], 2));
+    
+    colRight.append(cell1, cell2);
+    collageWrapper.append(colLeft, colRight);
+  } else {
+    // itemsToUse.length >= 4
+    const colLeft = el('div');
+    colLeft.style.flex = '1.4';
+    colLeft.style.height = '100%';
+    colLeft.append(makeCollageItem(itemsToUse[0], 0));
+    
+    const colRight = el('div');
+    colRight.style.width = '40%';
+    colRight.style.height = '100%';
+    colRight.style.display = 'flex';
+    colRight.style.flexDirection = 'column';
+    colRight.style.gap = '4px';
+    
+    const cell1 = el('div'); cell1.style.flex = '1'; cell1.append(makeCollageItem(itemsToUse[1], 1));
+    const cell2 = el('div'); cell2.style.flex = '1'; cell2.append(makeCollageItem(itemsToUse[2], 2));
+    const cell3 = el('div'); cell3.style.flex = '1'; cell3.append(makeCollageItem(itemsToUse[3], 3, totalMedia, true));
+    
+    colRight.append(cell1, cell2, cell3);
+    collageWrapper.append(colLeft, colRight);
+  }
+  
+  spotlightMedia.append(collageWrapper);
   
   // 2. Stats Card
   const itemCount = state.total || album.media_count;
@@ -938,6 +1035,42 @@ function wire() {
     btnBack.addEventListener('click', () => {
       const layout = $('#app-layout');
       if (layout) layout.classList.remove('show-detail');
+    });
+  }
+
+  // ---- remove album button ----
+  const btnRemove = $('#btn-remove-album');
+  if (btnRemove) {
+    btnRemove.addEventListener('click', async () => {
+      const chatId = state.current;
+      if (!chatId) return;
+      
+      const a = state.albums.find(x => x.chat_id === chatId);
+      const title = a ? (a.title || chatId) : chatId;
+      
+      if (!confirm(`Are you sure you want to remove the album "${title}"? This will delete all synced media from the database.`)) {
+        return;
+      }
+      
+      btnRemove.disabled = true;
+      btnRemove.textContent = 'Removing…';
+      try {
+        await api(`/api/albums/${chatId}`, { method: 'DELETE' });
+        // Deselect current
+        state.current = null;
+        state.media = [];
+        state.offset = 0;
+        state.total = 0;
+        
+        // Reload albums and select first
+        await loadAlbums();
+        await ensurePresetAndSelect();
+      } catch (err) {
+        alert('Failed to remove album: ' + err.message);
+      } finally {
+        btnRemove.disabled = false;
+        btnRemove.textContent = '🗑️ Remove';
+      }
     });
   }
 
