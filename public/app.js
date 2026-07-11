@@ -333,6 +333,8 @@ function renderMainHead() {
     $('#btn-sync-album').style.display = 'none';
     $('#btn-upload-media').style.display = 'none';
     $('#btn-select-mode').style.display = 'none';
+    const headerSelect = $('#header-uploader-filter');
+    if (headerSelect) headerSelect.style.display = 'none';
     $('#spotlight-section').classList.add('hidden');
     return;
   }
@@ -360,6 +362,26 @@ function renderMainHead() {
   selectBtn.textContent = state.selectionMode ? '✓ Done' : '☑ Select';
   selectBtn.className = 'btn-action-icon' + (state.selectionMode ? ' btn-primary' : '');
   
+  // Populate header select dropdown filter
+  const headerSelect = $('#header-uploader-filter');
+  if (headerSelect) {
+    headerSelect.innerHTML = '';
+    if (state.uploaders && state.uploaders.length >= 1) {
+      headerSelect.style.display = '';
+      const allOpt = el('option', null, 'All contributors');
+      allOpt.value = '';
+      headerSelect.append(allOpt);
+      for (const u of state.uploaders) {
+        const opt = el('option', null, escapeHtml(`${u.sender_name || u.sender_id} (${u.media_count})`));
+        opt.value = u.sender_id;
+        if (u.sender_id === state.filterSender) opt.selected = true;
+        headerSelect.append(opt);
+      }
+    } else {
+      headerSelect.style.display = 'none';
+    }
+  }
+
   // Render spotlight grid
   renderSpotlightSection(a);
 }
@@ -473,11 +495,15 @@ function renderSpotlightSection(album) {
     state.uploaders.forEach(u => {
       const row = el('div', 'members-list-item' + (state.filterSender === u.sender_id ? ' active' : ''));
       const nameEl = el('span', null, escapeHtml(u.sender_name || u.sender_id));
-      const countEl = el('span', null, ` (${u.media_count})`);
+      const countEl = el('span', 'uploader-count', `(${u.media_count})`);
       row.append(nameEl, countEl);
       row.addEventListener('click', (e) => {
         e.stopPropagation();
         applyUploaderFilter(u.sender_id);
+        
+        // Hide the tooltip on item click
+        const tooltip = $('#members-list-tooltip');
+        if (tooltip) tooltip.classList.remove('visible');
       });
       tooltipItems.append(row);
     });
@@ -540,12 +566,15 @@ function aspectOf(it) {
 
 function renderGallery() {
   const gallery = $('#gallery');
+  const main = $('.main');
+  const savedScroll = main ? main.scrollTop : 0;
+
   gallery.innerHTML = '';
   if (!state.media.length) return;
 
-  const containerWidth = gallery.clientWidth || (gallery.parentElement.clientWidth - 48);
+  const containerWidth = gallery.clientWidth || (gallery.parentElement.clientWidth - 64);
   const targetH = 200;
-  const gap = 4;
+  const gap = 8;
 
   // group by day (state.media is already date-desc)
   const groups = [];
@@ -570,6 +599,10 @@ function renderGallery() {
     frag.append(groupEl);
   }
   gallery.append(frag);
+
+  if (main) {
+    main.scrollTop = savedScroll;
+  }
 }
 
 function packRows(items, containerWidth, targetH, gap) {
@@ -946,6 +979,32 @@ function wire() {
       if (state.media.length > 0) openLightbox(0);
     });
   }
+
+  // ---- header select uploader filter change hook ----
+  const headerSelect = $('#header-uploader-filter');
+  if (headerSelect) {
+    headerSelect.addEventListener('change', () => {
+      applyUploaderFilter(headerSelect.value);
+    });
+  }
+
+  // ---- members card click toggle tooltip ----
+  const membersCard = $('#spotlight-members-card');
+  const tooltip = $('#members-list-tooltip');
+  if (membersCard && tooltip) {
+    membersCard.addEventListener('click', (e) => {
+      e.stopPropagation();
+      tooltip.classList.toggle('visible');
+    });
+    tooltip.addEventListener('click', (e) => {
+      e.stopPropagation(); // don't close tooltip when clicking inside it
+    });
+  }
+  // Close tooltip when clicking anywhere else
+  document.addEventListener('click', () => {
+    const tooltip = $('#members-list-tooltip');
+    if (tooltip) tooltip.classList.remove('visible');
+  });
 
   // Create hidden file input for upload
   const uploadInput = el('input');
