@@ -50,6 +50,29 @@ function dayLabel(unixSec) {
   return d.toLocaleDateString(undefined, opts);
 }
 
+function getInitials(name) {
+  if (!name) return '?';
+  const parts = name.trim().split(/\s+/);
+  if (parts.length >= 2) {
+    return (parts[0][0] + parts[1][0]).toUpperCase();
+  }
+  return name.trim().substring(0, 2).toUpperCase();
+}
+
+function getDeterministicColor(str) {
+  if (!str) return '#4f46e5';
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = str.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  const colors = [
+    '#ef4444', '#f59e0b', '#10b981', '#06b6d4', 
+    '#3b82f6', '#6366f1', '#8b5cf6', '#ec4899', '#f43f5e'
+  ];
+  const idx = Math.abs(hash) % colors.length;
+  return colors[idx];
+}
+
 // ---- state --------------------------------------------------------------
 
 const state = {
@@ -73,23 +96,38 @@ const IMAGE_TYPES = new Set(['photo', 'image']);
 
 // ---- status / header ----------------------------------------------------
 
+const PASTEL_CLASSES = ['pastel-purple', 'pastel-green', 'pastel-blue', 'pastel-orange', 'pastel-rose', 'pastel-amber'];
+
 async function loadStatus() {
   state.status = await api('/api/status');
-  const box = $('#status');
-  box.innerHTML = '';
   const s = state.status;
   const loginOverlay = $('#login-overlay');
 
   if (!s.hasCredentials) {
-    box.append(el('span', 'pill warn', 'Setup needed — add API keys to .env'));
     loginOverlay.style.display = 'none';
   } else if (!s.authenticated) {
-    box.append(el('span', 'pill warn', 'Not logged in'));
     loginOverlay.style.display = 'flex'; // Show web login screen
   } else {
-    const name = [s.me?.firstName, s.me?.lastName].filter(Boolean).join(' ') || s.me?.username || 'account';
-    box.append(el('span', 'pill', `Signed in as ${name}`));
     loginOverlay.style.display = 'none'; // Hide web login screen
+  }
+
+  const name = [s.me?.firstName, s.me?.lastName].filter(Boolean).join(' ') || s.me?.username || 'TG';
+  const initials = name.split(' ').map(p => p[0]).join('').substring(0, 2).toUpperCase() || 'TG';
+  const initialsEl = $('#user-avatar-initials');
+  if (initialsEl) initialsEl.textContent = initials;
+
+  const badge = $('#status-badge');
+  if (badge) {
+    badge.className = 'status-badge';
+    if (!s.hasCredentials) {
+      badge.classList.add('warn');
+      badge.title = 'Setup needed — add API keys to .env';
+    } else if (!s.authenticated) {
+      badge.classList.add('warn');
+      badge.title = 'Not logged in';
+    } else {
+      badge.title = `Signed in as ${name}`;
+    }
   }
 }
 
@@ -111,21 +149,85 @@ function renderSidebar() {
     list.append(el('div', 'album-sub', '<div style="padding:10px 12px;line-height:1.5">No albums yet.<br>Click <b>+ Add</b> to pick a Telegram chat.</div>'));
     return;
   }
-  for (const a of state.albums) {
-    const row = el('div', 'album' + (a.chat_id === state.current ? ' active' : ''));
-    row.dataset.chatId = a.chat_id;
-    const icon = el('div', 'album-icon', KIND_ICON[a.kind] || '📁');
-    const body = el('div', 'album-body');
-    body.append(el('div', 'album-title', escapeHtml(a.title || a.chat_id)));
+  state.albums.forEach((a, idx) => {
+    const isSelected = a.chat_id === state.current;
+    const pastelClass = PASTEL_CLASSES[idx % PASTEL_CLASSES.length];
+    
+    const card = el('div', `album-card ${pastelClass}${isSelected ? ' active' : ''}`);
+    card.dataset.chatId = a.chat_id;
+    
+    // Card Header (Title & Uploader avatars stack)
+    const headerRow = el('div', 'album-card-header');
+    
+    const titleCol = el('div');
+    titleCol.append(el('div', 'album-card-title', escapeHtml(a.title || a.chat_id)));
+    
     const syncing = state.syncTimers.has(a.chat_id);
-    body.append(el('div', 'album-sub', syncing ? 'Syncing…' : `${a.media_count} item${a.media_count === 1 ? '' : 's'}`));
-    const sync = el('button', 'album-sync' + (syncing ? ' spinning' : ''), '↻');
-    sync.title = 'Sync from Telegram';
-    sync.addEventListener('click', (e) => { e.stopPropagation(); startSync(a.chat_id, e.shiftKey); });
-    row.append(icon, body, sync);
-    row.addEventListener('click', () => selectAlbum(a.chat_id));
-    list.append(row);
-  }
+    const mediaCountText = syncing ? 'Syncing…' : `${a.media_count} item${a.media_count === 1 ? '' : 's'}`;
+    titleCol.append(el('div', 'album-card-meta', mediaCountText));
+    
+    headerRow.append(titleCol);
+    
+    // Avatar stack (uploaders)
+    if (a.uploaders && a.uploaders.length > 0) {
+      const stack = el('div', 'avatar-stack');
+      // Render up to 3 bubbles
+      const visibleUploaders = a.uploaders.slice(0, 3);
+      visibleUploaders.forEach(u => {
+        const initials = getInitials(u.sender_name || u.sender_id || '?');
+        const bubble = el('div', 'avatar-bubble', initials);
+        bubble.style.backgroundColor = getDeterministicColor(u.sender_id || u.sender_name);
+        bubble.title = u.sender_name;
+        stack.append(bubble);
+      });
+      
+      if (a.uploaders.length > 3) {
+        const extra = el('div', 'avatar-bubble', `+${a.uploaders.length - 3}`);
+        extra.style.backgroundColor = '#64748b';
+        extra.title = `${a.uploaders.length - 3} more contributors`;
+        stack.append(extra);
+      }
+      
+      headerRow.append(stack);
+    }
+    
+    card.append(headerRow);
+    
+    // Horizontal thumbnail previews row
+    if (a.previews && a.previews.length > 0) {
+      const previewRow = el('div', 'album-card-previews');
+      a.previews.forEach(p => {
+        if (p.thumb_downloaded === 1) {
+          const img = el('img', 'album-card-preview-img');
+          img.loading = 'lazy';
+          img.referrerPolicy = 'no-referrer';
+          img.src = `/api/media/${p.id}/thumb?session=${encodeURIComponent(localStorage.getItem('tg_session') || '')}`;
+          previewRow.append(img);
+        } else {
+          const pl = el('div', 'album-card-preview-placeholder', p.type === 'video' ? '🎬' : '🖼️');
+          previewRow.append(pl);
+        }
+      });
+      card.append(previewRow);
+    } else {
+      // Empty preview block placeholder
+      const previewRow = el('div', 'album-card-previews');
+      previewRow.append(el('div', 'album-card-preview-placeholder', '📁'));
+      card.append(previewRow);
+    }
+    
+    // Hover Sync button on card
+    const syncBtn = el('button', 'btn-card-sync' + (syncing ? ' spinning' : ''), '↻');
+    syncBtn.title = 'Sync from Telegram';
+    syncBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      startSync(a.chat_id, e.shiftKey);
+    });
+    card.append(syncBtn);
+    
+    card.addEventListener('click', () => selectAlbum(a.chat_id));
+    list.append(card);
+  });
 }
 
 function escapeHtml(s) {
@@ -151,15 +253,42 @@ async function selectAlbum(chatId) {
   state.selectionMode = false;
   state.selected.clear();
   updateSelectionUI();
-  // Close mobile sidebar on album select
-  $('.sidebar').classList.remove('open');
-  const bd = $('#sidebar-backdrop');
-  if (bd) bd.classList.remove('visible');
+  
+  // Set layout active theme colors
+  const a = state.albums.find(x => x.chat_id === chatId);
+  if (a) {
+    const idx = state.albums.indexOf(a);
+    const pastelClass = PASTEL_CLASSES[idx % PASTEL_CLASSES.length];
+    
+    // pastel background theme values mapping to CSS vars
+    const themeColors = {
+      'pastel-purple': { bg: '#faf5ff', accent: '#a855f7', text: '#581c87' },
+      'pastel-green':  { bg: '#f0fdf4', accent: '#22c55e', text: '#14532d' },
+      'pastel-blue':   { bg: '#ecfeff', accent: '#06b6d4', text: '#164e63' },
+      'pastel-orange': { bg: '#fff7ed', accent: '#f97316', text: '#7c2d12' },
+      'pastel-rose':   { bg: '#fff1f2', accent: '#f43f5e', text: '#881337' },
+      'pastel-amber':  { bg: '#fffbeb', accent: '#f59e0b', text: '#78350f' }
+    };
+    
+    const theme = themeColors[pastelClass] || themeColors['pastel-purple'];
+    const layoutEl = $('#app-layout');
+    if (layoutEl) {
+      layoutEl.style.setProperty('--active-pastel-bg', theme.bg);
+      layoutEl.style.setProperty('--active-pastel-accent', theme.accent);
+      layoutEl.style.setProperty('--active-pastel-text', theme.text);
+    }
+  }
+
+  // Slide-in view transition on mobile
+  const appLayout = $('#app-layout');
+  if (appLayout) appLayout.classList.add('show-detail');
+
   renderSidebar();
   renderMainHead();
   $('#gallery').innerHTML = '';
   $('#empty').classList.add('hidden');
   updateHash();
+  
   loadUploaders(chatId);
   await loadMore();
 
@@ -197,50 +326,166 @@ async function applyUploaderFilter(senderId) {
 }
 
 function renderMainHead() {
-  const head = $('#main-head');
   const a = state.albums.find((x) => x.chat_id === state.current);
-  if (!a) { head.innerHTML = ''; return; }
-  head.innerHTML = '';
-  const left = el('div');
-  left.append(el('h1', null, escapeHtml(a.title || a.chat_id)));
+  if (!a) {
+    $('#active-album-title').textContent = 'Select an Album';
+    $('#active-album-subtitle').textContent = 'Select a chat from the sidebar to view media.';
+    $('#btn-sync-album').style.display = 'none';
+    $('#btn-upload-media').style.display = 'none';
+    $('#btn-select-mode').style.display = 'none';
+    $('#spotlight-section').classList.add('hidden');
+    return;
+  }
+  
+  // Update header content
+  $('#active-album-title').textContent = a.title || a.chat_id;
+  
   const itemCount = state.total || a.media_count;
   const suffix = state.filterSender ? ' (filtered)' : '';
-  left.append(el('div', 'meta', `${itemCount} item${itemCount === 1 ? '' : 's'}${suffix} · ${a.downloaded_count} downloaded`));
-  const actions = el('div', 'head-actions');
+  $('#active-album-subtitle').textContent = `${itemCount} item${itemCount === 1 ? '' : 's'}${suffix} · ${a.downloaded_count || 0} downloaded`;
+  
+  // Set button display states
+  const syncBtn = $('#btn-sync-album');
+  const uploadBtn = $('#btn-upload-media');
+  const selectBtn = $('#btn-select-mode');
+  
+  syncBtn.style.display = '';
+  uploadBtn.style.display = '';
+  selectBtn.style.display = '';
+  
+  const syncing = state.syncTimers.has(a.chat_id);
+  syncBtn.textContent = syncing ? '↻ Syncing…' : '↻ Sync';
+  syncBtn.disabled = syncing;
+  
+  selectBtn.textContent = state.selectionMode ? '✓ Done' : '☑ Select';
+  selectBtn.className = 'btn-action-icon' + (state.selectionMode ? ' btn-primary' : '');
+  
+  // Render spotlight grid
+  renderSpotlightSection(a);
+}
 
-  if (state.uploaders.length >= 1) {
-    const select = el('select', 'uploader-filter');
-    const allOpt = el('option', null, 'All uploaders');
-    allOpt.value = '';
-    select.append(allOpt);
-    for (const u of state.uploaders) {
-      const opt = el('option', null, escapeHtml(`${u.sender_name || u.sender_id} (${u.media_count})`));
-      opt.value = u.sender_id;
-      if (u.sender_id === state.filterSender) opt.selected = true;
-      select.append(opt);
-    }
-    select.addEventListener('change', () => applyUploaderFilter(select.value));
-    actions.append(select);
+function renderSpotlightSection(album) {
+  const spotlightSection = $('#spotlight-section');
+  if (!state.media.length) {
+    spotlightSection.classList.add('hidden');
+    return;
   }
-
-  const selectBtn = el('button', 'btn' + (state.selectionMode ? ' btn-primary' : ''), state.selectionMode ? '✓ Done' : '☑ Select');
-  selectBtn.addEventListener('click', () => {
-    state.selectionMode = !state.selectionMode;
-    if (!state.selectionMode) state.selected.clear();
-    updateSelectionUI();
-    renderMainHead();
-  });
-  actions.append(selectBtn);
-
-  const uploadBtn = el('button', 'btn', '📤 Upload');
-  uploadBtn.addEventListener('click', () => $('#upload-input').click());
-  actions.append(uploadBtn);
-
-  const syncBtn = el('button', 'btn btn-primary', state.syncTimers.has(a.chat_id) ? 'Syncing…' : '↻ Sync');
-  syncBtn.disabled = state.syncTimers.has(a.chat_id);
-  syncBtn.addEventListener('click', (e) => startSync(a.chat_id, e.shiftKey));
-  actions.append(syncBtn);
-  head.append(left, actions);
+  spotlightSection.classList.remove('hidden');
+  
+  // 1. Spotlight Media Card (first item in the album)
+  const spotlightMedia = $('#spotlight-media-card');
+  spotlightMedia.innerHTML = '';
+  
+  const it = state.media[0];
+  const idx = 0;
+  
+  const tile = el('div', 'tile');
+  tile.style.width = '100%';
+  tile.style.height = '100%';
+  tile.dataset.index = idx;
+  
+  const img = el('img');
+  img.loading = 'lazy';
+  img.decoding = 'async';
+  img.referrerPolicy = 'no-referrer';
+  img.src = `/api/media/${it.id}/thumb?session=${encodeURIComponent(localStorage.getItem('tg_session') || '')}`;
+  img.style.width = '100%';
+  img.style.height = '100%';
+  img.style.objectFit = 'cover';
+  
+  img.addEventListener('error', () => {
+    img.remove();
+    if (it.type === 'video' && it.file_downloaded === 1) {
+      const v = el('video');
+      v.referrerPolicy = 'no-referrer';
+      v.src = `/api/media/${it.id}/file?session=${encodeURIComponent(localStorage.getItem('tg_session') || '')}#t=0.1`;
+      v.preload = 'metadata';
+      v.muted = true;
+      v.playsInline = true;
+      v.style.width = '100%';
+      v.style.height = '100%';
+      v.style.objectFit = 'cover';
+      tile.prepend(v);
+    } else {
+      tile.classList.add('noimg');
+      let icon = '🖼️';
+      if (it.type === 'video') icon = '🎬';
+      else if (it.type === 'document') icon = '📄';
+      tile.prepend(el('div', null, icon));
+    }
+  }, { once: true });
+  
+  tile.append(img);
+  
+  if (it.type === 'video') {
+    const play = el('div', 'play', '<span>▶</span>');
+    tile.append(play);
+    if (it.duration) tile.append(el('div', 'badge', fmtDuration(it.duration)));
+  } else if (it.type === 'gif') {
+    tile.append(el('div', 'badge', 'GIF'));
+  }
+  
+  spotlightMedia.append(tile);
+  
+  // 2. Stats Card
+  const itemCount = state.total || album.media_count;
+  $('#spotlight-stats').textContent = `${itemCount} item${itemCount === 1 ? '' : 's'}`;
+  
+  const syncedTimeText = album.synced_at 
+    ? `Synced ${new Date(album.synced_at * 1000).toLocaleDateString()}`
+    : 'Never synced';
+  $('#spotlight-sync-time').textContent = syncedTimeText;
+  
+  // 3. Members Card (uploader avatar stack)
+  const avatarStack = $('#spotlight-avatar-stack');
+  avatarStack.innerHTML = '';
+  const membersCountEl = $('#spotlight-members-count');
+  
+  if (state.uploaders && state.uploaders.length > 0) {
+    const visibleUploaders = state.uploaders.slice(0, 4);
+    visibleUploaders.forEach(u => {
+      const initials = getInitials(u.sender_name || u.sender_id || '?');
+      const bubble = el('div', 'avatar-bubble', initials);
+      bubble.style.backgroundColor = getDeterministicColor(u.sender_id || u.sender_name);
+      bubble.title = u.sender_name;
+      avatarStack.append(bubble);
+    });
+    
+    if (state.uploaders.length > 4) {
+      membersCountEl.textContent = `+${state.uploaders.length - 4}`;
+      membersCountEl.style.display = '';
+    } else {
+      membersCountEl.style.display = 'none';
+    }
+    
+    // Tooltip uploader list for active filters
+    const tooltipItems = $('#members-list-items');
+    tooltipItems.innerHTML = '';
+    
+    // Add Show All row
+    const allRow = el('div', 'members-list-item' + (!state.filterSender ? ' active' : ''), 'Show All');
+    allRow.addEventListener('click', (e) => {
+      e.stopPropagation();
+      applyUploaderFilter(null);
+    });
+    tooltipItems.append(allRow);
+    
+    state.uploaders.forEach(u => {
+      const row = el('div', 'members-list-item' + (state.filterSender === u.sender_id ? ' active' : ''));
+      const nameEl = el('span', null, escapeHtml(u.sender_name || u.sender_id));
+      const countEl = el('span', null, ` (${u.media_count})`);
+      row.append(nameEl, countEl);
+      row.addEventListener('click', (e) => {
+        e.stopPropagation();
+        applyUploaderFilter(u.sender_id);
+      });
+      tooltipItems.append(row);
+    });
+  } else {
+    avatarStack.append(el('div', 'avatar-bubble', '?'));
+    membersCountEl.style.display = 'none';
+    $('#members-list-items').innerHTML = '<div style="font-size:12px;color:var(--text-dim);padding:4px">No contributors found.</div>';
+  }
 }
 
 async function loadMore() {
@@ -654,23 +899,53 @@ function renderLightbox() {
 // ---- wiring -------------------------------------------------------------
 
 function wire() {
-  // ---- mobile sidebar toggle ----
-  const backdrop = el('div', 'sidebar-backdrop');
-  backdrop.id = 'sidebar-backdrop';
-  document.body.append(backdrop);
+  // ---- back button to exit detail on mobile ----
+  const btnBack = $('#btn-back-to-albums');
+  if (btnBack) {
+    btnBack.addEventListener('click', () => {
+      const layout = $('#app-layout');
+      if (layout) layout.classList.remove('show-detail');
+    });
+  }
 
-  const toggleSidebar = () => {
-    const sidebar = $('.sidebar');
-    const isOpen = sidebar.classList.toggle('open');
-    backdrop.classList.toggle('visible', isOpen);
-  };
-  const closeSidebar = () => {
-    $('.sidebar').classList.remove('open');
-    backdrop.classList.remove('visible');
-  };
+  // ---- main header buttons ----
+  const btnSync = $('#btn-sync-album');
+  if (btnSync) {
+    btnSync.addEventListener('click', (e) => {
+      if (state.current) startSync(state.current, e.shiftKey);
+    });
+  }
+  const btnUpload = $('#btn-upload-media');
+  if (btnUpload) {
+    btnUpload.addEventListener('click', () => {
+      $('#upload-input').click();
+    });
+  }
+  const btnSelect = $('#btn-select-mode');
+  if (btnSelect) {
+    btnSelect.addEventListener('click', () => {
+      state.selectionMode = !state.selectionMode;
+      if (!state.selectionMode) state.selected.clear();
+      updateSelectionUI();
+      renderMainHead();
+    });
+  }
 
-  $('#sidebar-toggle').addEventListener('click', toggleSidebar);
-  backdrop.addEventListener('click', closeSidebar);
+  // ---- spotlight add card upload hook ----
+  const addCard = $('#spotlight-upload-card');
+  if (addCard) {
+    addCard.addEventListener('click', () => {
+      $('#upload-input').click();
+    });
+  }
+
+  // ---- spotlight spotlight card click to lightbox ----
+  const spotlightMediaCard = $('#spotlight-media-card');
+  if (spotlightMediaCard) {
+    spotlightMediaCard.addEventListener('click', () => {
+      if (state.media.length > 0) openLightbox(0);
+    });
+  }
 
   // Create hidden file input for upload
   const uploadInput = el('input');
@@ -937,10 +1212,12 @@ async function handleUpload(e) {
   const chatId = state.current;
   if (!chatId) return;
 
-  const uploadBtn = Array.from(document.querySelectorAll('.head-actions button')).find((b) => b.textContent.includes('Upload'));
-  const prevText = uploadBtn.textContent;
-  uploadBtn.textContent = 'Uploading…';
-  uploadBtn.disabled = true;
+  const uploadBtn = $('#btn-upload-media');
+  const prevText = uploadBtn ? uploadBtn.textContent : 'Upload';
+  if (uploadBtn) {
+    uploadBtn.textContent = 'Uploading…';
+    uploadBtn.disabled = true;
+  }
 
   try {
     const fileMeta = files.map(f => ({ name: f.name, mime: f.type || 'application/octet-stream' }));
@@ -982,8 +1259,10 @@ async function handleUpload(e) {
   } catch (err) {
     alert('Upload failed: ' + err.message);
   } finally {
-    uploadBtn.textContent = prevText;
-    uploadBtn.disabled = false;
+    if (uploadBtn) {
+      uploadBtn.textContent = prevText;
+      uploadBtn.disabled = false;
+    }
   }
 }
 

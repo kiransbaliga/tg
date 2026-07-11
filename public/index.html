@@ -8,32 +8,81 @@
        Send no Referer so those requests are allowed. -->
   <meta name="referrer" content="no-referrer" />
   <title>TG Gallery</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/styles.css" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🖼️</text></svg>" />
 </head>
 <body>
-  <header class="topbar">
-    <div style="display: flex; align-items: center; gap: 10px;">
-      <button id="sidebar-toggle" class="sidebar-toggle" title="Toggle sidebar">☰</button>
-      <div class="brand">
-        <span class="brand-mark">◈</span>
-        <span class="brand-name">TG Gallery</span>
-      </div>
-    </div>
-    <div id="status" class="status"></div>
-  </header>
-
-  <div class="layout">
+  <div class="layout" id="app-layout">
     <aside class="sidebar">
-      <div class="sidebar-head">
-        <span>Albums</span>
-        <button id="add-album" class="btn-add" title="Add an album from your Telegram chats">+ Add</button>
+      <div class="sidebar-header">
+        <div class="user-profile" id="user-profile" title="Account status">
+          <span class="avatar-initials" id="user-avatar-initials">TG</span>
+        </div>
+        <div class="sidebar-title-container">
+          <h1 class="sidebar-title">My Chats</h1>
+        </div>
+        <div class="sidebar-actions">
+          <button id="add-album" class="btn-icon-add" title="Add an album from Telegram">+</button>
+          <div id="status-badge" class="status-badge" title="Connection status"></div>
+        </div>
       </div>
       <nav id="album-list" class="album-list"></nav>
     </aside>
 
     <main class="main">
-      <div id="main-head" class="main-head"></div>
+      <header class="main-header">
+        <button id="btn-back-to-albums" class="btn-back" title="Back to albums">←</button>
+        <div class="main-header-title">
+          <h1 id="active-album-title">Select an Album</h1>
+          <div id="active-album-subtitle" class="meta">Select a chat from the sidebar to view media.</div>
+        </div>
+        <div class="main-header-actions">
+          <button id="btn-sync-album" class="btn-action-icon" title="Sync from Telegram">↻ Sync</button>
+          <button id="btn-upload-media" class="btn-action-icon" title="Upload new media">📤 Upload</button>
+          <button id="btn-select-mode" class="btn-action-icon" title="Select items">☑ Select</button>
+        </div>
+      </header>
+
+      <!-- Spotlight Header Grid -->
+      <section id="spotlight-section" class="spotlight-section hidden">
+        <div class="spotlight-left">
+          <div id="spotlight-media-card" class="spotlight-card media-card">
+            <!-- Large video/photo will be rendered here -->
+            <div class="spotlight-placeholder">No media available</div>
+          </div>
+        </div>
+        <div class="spotlight-right">
+          <!-- Card 1: Stats -->
+          <div class="spotlight-card info-card">
+            <div class="spotlight-card-label">Stats</div>
+            <div class="spotlight-card-value" id="spotlight-stats">0 items</div>
+            <div class="spotlight-card-sub" id="spotlight-sync-time">Never synced</div>
+          </div>
+          <!-- Card 2: Members / Uploaders -->
+          <div class="spotlight-card members-card" id="spotlight-members-card">
+            <div class="spotlight-card-label">Members</div>
+            <div class="avatar-stack-container">
+              <div class="avatar-stack" id="spotlight-avatar-stack"></div>
+              <div class="avatar-stack-text" id="spotlight-members-count">+0</div>
+            </div>
+            <div class="members-list-tooltip" id="members-list-tooltip">
+              <h4>Active Uploaders</h4>
+              <div id="members-list-items"></div>
+            </div>
+          </div>
+          <!-- Card 3: Upload -->
+          <div class="spotlight-card add-card" id="spotlight-upload-card">
+            <div class="add-card-content">
+              <span class="add-icon">+</span>
+              <span class="add-label">Add</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <div id="gallery" class="gallery"></div>
       <div id="sentinel" class="sentinel"></div>
       <div id="empty" class="empty"></div>

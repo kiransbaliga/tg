@@ -126,13 +126,31 @@ export async function getAlbum(chatId) {
 
 export async function listAlbums() {
   ensureDb();
-  return sql`
+  const albums = await sql`
     SELECT a.*,
       COALESCE((SELECT COUNT(*) FROM media m WHERE m.chat_id = a.chat_id), 0)::int AS media_count,
       COALESCE((SELECT COUNT(*) FROM media m WHERE m.chat_id = a.chat_id AND m.file_downloaded = 1), 0)::int AS downloaded_count
     FROM albums a
     ORDER BY a.created_at DESC
   `;
+  for (const a of albums) {
+    a.previews = await sql`
+      SELECT id, type, thumb_downloaded FROM media
+      WHERE chat_id = ${a.chat_id}
+      ORDER BY date DESC, message_id DESC
+      LIMIT 4
+    `;
+    a.uploaders = await sql`
+      SELECT m.sender_id, COALESCE(s.sender_name, m.sender_name) AS sender_name, COUNT(*)::int AS media_count
+      FROM media m
+      LEFT JOIN senders s ON m.sender_id = s.sender_id
+      WHERE m.chat_id = ${a.chat_id} AND m.sender_id IS NOT NULL
+      GROUP BY m.sender_id, s.sender_name, m.sender_name
+      ORDER BY media_count DESC
+      LIMIT 5
+    `;
+  }
+  return albums;
 }
 
 export async function deleteAlbum(chatId) {
